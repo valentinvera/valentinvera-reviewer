@@ -3,6 +3,7 @@ import { db, isQueueReady } from "./db"
 import { errorMessage, log } from "./logger"
 import { queueStats, recoverStaleJobs } from "./queue"
 import { isWorkerRunning, startWorker } from "./worker"
+import { handleGitHubWebhook } from "./webhooks/github"
 import "./worker/handlers"
 
 const SERVICE = "valentinvera-reviewer"
@@ -45,7 +46,10 @@ const server = Bun.serve({
       })
     }
 
-    // TODO: POST /webhooks/github
+    if (request.method === "POST" && url.pathname === "/webhooks/github") {
+      return handleGitHubWebhook(request)
+    }
+
     // TODO: real review handler (`review_pull_request`).
     return Response.json({ error: "not_found" }, { status: 404 })
   },
