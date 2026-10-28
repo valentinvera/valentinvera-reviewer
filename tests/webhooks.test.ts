@@ -133,4 +133,115 @@ describe("POST /webhooks/github", () => {
     expect(response.status).toBe(202)
     expect(queueStats().queued).toBe(1)
   })
+
+  test("enqueues a manual /review command", async () => {
+    const body = JSON.stringify({
+      action: "created",
+      installation: { id: 99 },
+      repository: { full_name: "valentinvera/plata" },
+      issue: { number: 51, pull_request: { url: "https://api.github.com/pulls/51" } },
+      comment: {
+        body: "/review",
+        user: { login: "valentinvera" },
+        author_association: "OWNER",
+      },
+    })
+    const response = await handleGitHubWebhook(
+      await webhookRequest({ body, event: "issue_comment", delivery: "command-1" }),
+    )
+
+    expect(response.status).toBe(202)
+    expect(queueStats().queued).toBe(1)
+
+    const row = db.query<{ payload: string }, []>("SELECT payload FROM jobs LIMIT 1").get()
+
+    expect(JSON.parse(row!.payload)).toMatchObject({
+      installationId: 99,
+      repo: "valentinvera/plata",
+      prNumber: 51,
+      headSha: "",
+      action: "manual",
+      force: true,
+    })
+  })
+
+  test("accepts a mentioned /review command", async () => {
+    const body = JSON.stringify({
+      action: "created",
+      installation: { id: 99 },
+      repository: { full_name: "valentinvera/plata" },
+      issue: { number: 51, pull_request: { url: "https://api.github.com/pulls/51" } },
+      comment: {
+        body: "@valentinvera-reviewer /review",
+        user: { login: "valentinvera" },
+        author_association: "OWNER",
+      },
+    })
+    const response = await handleGitHubWebhook(
+      await webhookRequest({ body, event: "issue_comment", delivery: "command-2" }),
+    )
+
+    expect(response.status).toBe(202)
+    expect(queueStats().queued).toBe(1)
+  })
+
+  test("ignores non-command comments", async () => {
+    const body = JSON.stringify({
+      action: "created",
+      installation: { id: 99 },
+      repository: { full_name: "valentinvera/plata" },
+      issue: { number: 51, pull_request: { url: "https://api.github.com/pulls/51" } },
+      comment: {
+        body: "looks good to me",
+        user: { login: "valentinvera" },
+        author_association: "OWNER",
+      },
+    })
+    const response = await handleGitHubWebhook(
+      await webhookRequest({ body, event: "issue_comment", delivery: "command-3" }),
+    )
+
+    expect(response.status).toBe(202)
+    expect(queueStats().queued).toBe(0)
+  })
+
+  test("rejects /review from users without write access", async () => {
+    const body = JSON.stringify({
+      action: "created",
+      installation: { id: 99 },
+      repository: { full_name: "valentinvera/plata" },
+      issue: { number: 51, pull_request: { url: "https://api.github.com/pulls/51" } },
+      comment: {
+        body: "/review",
+        user: { login: "stranger" },
+        author_association: "NONE",
+      },
+    })
+    const response = await handleGitHubWebhook(
+      await webhookRequest({ body, event: "issue_comment", delivery: "command-4" }),
+    )
+
+    expect(response.status).toBe(202)
+    expect(queueStats().queued).toBe(0)
+  })
+
+  test("ignores issue comments that are not on a pull request", async () => {
+    const body = JSON.stringify({
+      action: "created",
+      installation: { id: 99 },
+      repository: { full_name: "valentinvera/plata" },
+      issue: { number: 7 },
+      comment: {
+        body: "/review",
+        user: { login: "valentinvera" },
+        author_association: "OWNER",
+      },
+    })
+    const response = await handleGitHubWebhook(
+      await webhookRequest({ body, event: "issue_comment", delivery: "command-5" }),
+    )
+
+    expect(response.status).toBe(202)
+    expect(queueStats().queued).toBe(0)
+  })
 })

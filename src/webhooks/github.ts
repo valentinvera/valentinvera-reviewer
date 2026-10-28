@@ -4,6 +4,9 @@ import { errorMessage, log } from "../logger"
 import { enqueueJob } from "../queue"
 
 const HANDLED_ACTIONS = new Set(["opened", "synchronize", "reopened", "ready_for_review"])
+const HANDLED_EVENTS = new Set(["pull_request", "issue_comment"])
+const ALLOWED_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"])
+const REVIEW_COMMAND = /^(?:@[a-z0-9-]+\s+)?\/review$/i
 
 interface PullRequestEventPayload {
   action: string
@@ -15,6 +18,21 @@ interface PullRequestEventPayload {
     head: { sha: string }
   }
   sender?: { login: string }
+}
+
+interface IssueCommentEventPayload {
+  action: string
+  installation?: { id: number }
+  repository: { full_name: string }
+  issue: {
+    number: number
+    pull_request?: unknown
+  }
+  comment: {
+    body: string
+    user: { login: string }
+    author_association: string
+  }
 }
 
 let handlersRegistered = false
@@ -65,6 +83,56 @@ function registerHandlers(): void {
       queued,
     })
   })
+
+  getWebhooks().on("issue_comment", ({ id, payload }) => {
+    const event = payload as unknown as IssueCommentEventPayload
+
+    if (event.action !== "created") return
+    if (!event.issue.pull_request) return
+    if (!REVIEW_COMMAND.test(event.comment.body.trim())) return
+
+    if (!ALLOWED_ASSOCIATIONS.has(event.comment.author_association.toUpperCase())) {
+      log.warn("webhook.command_forbidden", {
+        delivery: id,
+        repo: event.repository.full_name,
+        pr: event.issue.number,
+        association: event.comment.author_association,
+      })
+      return
+    }
+
+    const installationId = event.installation?.id
+    if (!installationId) {
+      log.warn("webhook.missing_installation", {
+        delivery: id,
+        repo: event.repository.full_name,
+        pr: event.issue.number,
+      })
+      return
+    }
+
+    const queued = enqueueJob({
+      deliveryId: id,
+      kind: "review_pull_request",
+      payload: {
+        installationId,
+        repo: event.repository.full_name,
+        prNumber: event.issue.number,
+        headSha: "",
+        action: "manual",
+        sender: event.comment.user.login,
+        force: true,
+      },
+    })
+
+    log.info("webhook.command", {
+      delivery: id,
+      repo: event.repository.full_name,
+      pr: event.issue.number,
+      sender: event.comment.user.login,
+      queued,
+    })
+  })
 }
 
 /**
@@ -74,6 +142,7 @@ function registerHandlers(): void {
  * - `ping` is acknowledged with 200.
  * - `pull_request` (opened/synchronize/reopened/ready_for_review, non-draft)
  *   is enqueued as `review_pull_request` and acknowledged with 202.
+ * - `/review` comments on a PR enqueue a forced manual review.
  *
  * The actual review is intentionally not implemented here: the worker owns it.
  */
@@ -118,7 +187,7 @@ export async function handleGitHubWebhook(request: Request): Promise<Response> {
     return json({ ok: true, pong: true }, 200)
   }
 
-  if (event !== "pull_request") {
+  if (!HANDLED_EVENTS.has(event)) {
     return json({ ok: true, ignored: `event:${event}` }, 202)
   }
 
