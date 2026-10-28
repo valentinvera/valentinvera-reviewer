@@ -8,5 +8,6 @@ describe("migrations", () => {
       .all()
 
     expect(versions.map((row) => row.version)).toContain("001_initial")
+    expect(versions.map((row) => row.version)).toContain("002_review_state")
   })
 })
