@@ -19,11 +19,8 @@ function write(level: LogLevel, msg: string, context?: LogContext): void {
     ...context,
   })
 
-  if (level === "error" || level === "warn") {
-    console.error(line)
-  } else {
-    console.log(line)
-  }
+  // Keep stdout clean for CLI output (`review:dry-run --json`).
+  console.error(line)
 }
 
 export const log = {
