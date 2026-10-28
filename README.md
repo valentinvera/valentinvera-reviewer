@@ -18,10 +18,16 @@ LOG_LEVEL=info
 GITHUB_APP_ID=
 GITHUB_PRIVATE_KEY_PATH=./secrets/valentinvera-reviewer.pem
 GITHUB_WEBHOOK_SECRET=
+# GITHUB_TOKEN= # solo para review:dry-run
 
 OPENCODE_API_KEY=
 AI_MODEL=deepseek-v4.1-flash
 AI_REASONING_MODE=off
+
+REVIEW_LANGUAGE=es
+REVIEW_MAX_DIFF_CHARS=240000
+REVIEW_MAX_FINDINGS=12
+REVIEW_CHUNK_CHARS=16000
 
 QUEUE_POLL_MS=1000
 JOB_MAX_ATTEMPTS=3
@@ -41,6 +47,7 @@ bun run check       # typecheck + lint + format
 bun run test        # tests
 bun run queue:demo  # encola un job de prueba
 bun run backup:db   # snapshot en ./backups (BACKUP_DIR, BACKUP_KEEP)
+bun run review:dry-run <owner/repo> <pr> # review sin publicar
 ```
 
 - Hooks: `bun install` instala lefthook (pre-commit + commit-msg).
