@@ -1,0 +1,45 @@
+{
+  "name": "valentinvera-reviewer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "module": "src/index.ts",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "queue:demo": "bun scripts/queue-demo.ts",
+    "lint": "oxlint --ignore-path .gitignore",
+    "lint:fix": "oxlint --ignore-path .gitignore --fix",
+    "format": "oxfmt .",
+    "format:check": "oxfmt --check .",
+    "check": "bun run typecheck && bun run lint && bun run format:check",
+    "test": "bun test",
+    "test:coverage": "bun test --coverage",
+    "backup:db": "bun scripts/backup-db.ts",
+    "commitlint": "commitlint",
+    "prepare": "lefthook install"
+  },
+  "dependencies": {
+    "@ai-sdk/openai-compatible": "^3.0.78",
+    "@octokit/app": "^16.1.4",
+    "@octokit/webhooks": "^14.2.0",
+    "ai": "^7.0.153",
+    "octokit": "^5.0.5",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^21.2.4",
+    "@commitlint/config-conventional": "^21.2.4",
+    "@types/bun": "latest",
+    "lefthook": "^2.2.2",
+    "oxfmt": "^0.74.0",
+    "oxlint": "^1.89.0",
+    "typescript": "^7.0.2"
+  },
+  "commitlint": {
+    "extends": [
+      "@commitlint/config-conventional"
+    ]
+  }
+}

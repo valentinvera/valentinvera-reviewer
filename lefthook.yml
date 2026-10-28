@@ -1,0 +1,24 @@
+pre-commit:
+  parallel: false
+  commands:
+    lint:
+      glob:
+        - "*.{ts,tsx,js,jsx}"
+        - "**/*.{ts,tsx,js,jsx}"
+      run: bunx oxlint --fix {staged_files}
+      stage_fixed: true
+    format:
+      glob:
+        - "*.{ts,tsx,js,jsx,json,md}"
+        - "**/*.{ts,tsx,js,jsx,json,md}"
+      run: bunx oxfmt {staged_files}
+      stage_fixed: true
+    typecheck:
+      run: bun run typecheck
+    test:
+      run: bun run test
+
+commit-msg:
+  commands:
+    commitlint:
+      run: bun run commitlint --edit {1}
