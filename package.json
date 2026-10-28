@@ -18,7 +18,8 @@
     "test:coverage": "bun test --coverage",
     "backup:db": "bun scripts/backup-db.ts",
     "commitlint": "commitlint",
-    "prepare": "lefthook install"
+    "prepare": "lefthook install",
+    "review:dry-run": "bun scripts/review-dry-run.ts"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^3.0.78",

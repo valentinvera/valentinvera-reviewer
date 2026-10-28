@@ -3,6 +3,7 @@ import { resolve } from "node:path"
 
 export type LogLevel = "debug" | "info" | "warn" | "error"
 export type ReasoningMode = "off" | "low" | "high" | "max"
+export type ReviewLanguage = "es" | "en"
 
 export interface Config {
   /** HTTP server */
@@ -18,6 +19,8 @@ export interface Config {
   githubPrivateKey: string | undefined
   githubWebhookSecret: string | undefined
   githubApiUrl: string
+  /** Optional PAT for local dry-runs and scripts. */
+  githubToken: string | undefined
 
   /** AI provider (OpenCode Go, OpenAI-compatible) */
   opencodeApiKey: string | undefined
@@ -32,6 +35,12 @@ export interface Config {
   jobMaxAttempts: number
   workerConcurrency: number
   workerEnabled: boolean
+
+  /** Review */
+  reviewLanguage: ReviewLanguage
+  reviewMaxDiffChars: number
+  reviewMaxFindings: number
+  reviewChunkChars: number
 }
 
 function str(value: string | undefined): string | undefined {
@@ -89,6 +98,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     githubPrivateKey: loadPrivateKey(env.GITHUB_PRIVATE_KEY, env.GITHUB_PRIVATE_KEY_PATH),
     githubWebhookSecret: str(env.GITHUB_WEBHOOK_SECRET),
     githubApiUrl: str(env.GITHUB_API_URL) ?? "https://api.github.com",
+    githubToken: str(env.GITHUB_TOKEN),
 
     opencodeApiKey: str(env.OPENCODE_API_KEY),
     aiBaseUrl: str(env.AI_BASE_URL) ?? "https://opencode.ai/inference/go/openai/v1",
@@ -100,6 +110,11 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     jobMaxAttempts: int(env.JOB_MAX_ATTEMPTS, 3),
     workerConcurrency: Math.max(1, int(env.WORKER_CONCURRENCY, 1)),
     workerEnabled: bool(env.WORKER_ENABLED, true),
+
+    reviewLanguage: oneOf(env.REVIEW_LANGUAGE, ["es", "en"] as const, "es"),
+    reviewMaxDiffChars: int(env.REVIEW_MAX_DIFF_CHARS, 240_000),
+    reviewMaxFindings: int(env.REVIEW_MAX_FINDINGS, 12),
+    reviewChunkChars: int(env.REVIEW_CHUNK_CHARS, 16_000),
   }
 }
 
