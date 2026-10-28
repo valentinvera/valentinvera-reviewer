@@ -123,7 +123,7 @@ describe("processReviewJob", () => {
     expect(calls.reviews[0]?.body).toContain("Review automático")
     expect(calls.comments).toHaveLength(1)
     expect(calls.comments[0]).toContain("valentinvera-reviewer")
-    expect(hasReviewed(payload.repo, payload.prNumber, payload.headSha)).toBe(true)
+    expect(hasReviewed(payload.repo, payload.prNumber, payload.headSha!)).toBe(true)
   })
 
   test("does not review the same head sha twice", async () => {
@@ -153,7 +153,7 @@ describe("processReviewJob", () => {
     })
 
     expect(calls.reviews).toHaveLength(0)
-    expect(hasReviewed(payload.repo, payload.prNumber, payload.headSha)).toBe(false)
+    expect(hasReviewed(payload.repo, payload.prNumber, payload.headSha!)).toBe(false)
   })
 
   test("skips drafts and closed pull requests", async () => {
@@ -206,5 +206,24 @@ describe("processReviewJob", () => {
     expect(calls.reviews).toHaveLength(2)
     expect(calls.reviews[1]?.comments).toHaveLength(0)
     expect(calls.reviews[1]?.body).toContain("comentarios inline")
+  })
+
+  test("forces a new review for the same sha on manual commands", async () => {
+    const { client, calls } = fakeClient()
+
+    await processReviewJob(payload, {
+      getClient: async () => client,
+      generateReview: async () => generated,
+    })
+
+    await processReviewJob(
+      { ...payload, headSha: "", action: "manual", force: true },
+      {
+        getClient: async () => client,
+        generateReview: async () => generated,
+      },
+    )
+
+    expect(calls.reviews).toHaveLength(2)
   })
 })

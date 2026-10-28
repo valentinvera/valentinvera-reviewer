@@ -16,9 +16,12 @@ export interface ReviewJobPayload {
   installationId: number
   repo: string
   prNumber: number
-  headSha: string
+  /** Empty/omitted for manual `/review`; resolved from the current PR head. */
+  headSha?: string
   action: string
   sender?: string
+  /** Manual commands bypass the already-reviewed check for the same SHA. */
+  force?: boolean
 }
 
 export interface ReviewJobDeps {
@@ -85,7 +88,11 @@ export async function processReviewJob(
   const getClient = deps.getClient ?? getInstallationClient
   const generate = deps.generateReview ?? generateReview
 
-  if (hasReviewed(payload.repo, payload.prNumber, payload.headSha)) {
+  if (
+    payload.headSha &&
+    !payload.force &&
+    hasReviewed(payload.repo, payload.prNumber, payload.headSha)
+  ) {
     log.info("review.skip.already_reviewed", {
       repo: payload.repo,
       pr: payload.prNumber,
@@ -107,12 +114,23 @@ export async function processReviewJob(
     return
   }
 
-  if (pr.headSha !== payload.headSha) {
+  const headSha = payload.headSha?.trim() || pr.headSha
+
+  if (!payload.force && pr.headSha !== headSha) {
     log.info("review.skip.stale", {
       repo: payload.repo,
       pr: payload.prNumber,
-      jobSha: payload.headSha.slice(0, 10),
+      jobSha: headSha.slice(0, 10),
       currentSha: pr.headSha.slice(0, 10),
+    })
+    return
+  }
+
+  if (!payload.force && hasReviewed(payload.repo, payload.prNumber, headSha)) {
+    log.info("review.skip.already_reviewed", {
+      repo: payload.repo,
+      pr: payload.prNumber,
+      sha: headSha.slice(0, 10),
     })
     return
   }
@@ -135,7 +153,7 @@ export async function processReviewJob(
 
   const reviewBody = buildReviewBody({
     result: generated.result,
-    headSha: payload.headSha,
+    headSha,
     model: generated.model,
     unanchored,
     truncated: generated.clipped.truncated,
@@ -145,7 +163,7 @@ export async function processReviewJob(
 
   try {
     review = await client.createReview(payload.repo, payload.prNumber, {
-      commitId: payload.headSha,
+      commitId: headSha,
       body: reviewBody,
       comments,
     })
@@ -158,7 +176,7 @@ export async function processReviewJob(
       })
 
       review = await client.createReview(payload.repo, payload.prNumber, {
-        commitId: payload.headSha,
+        commitId: headSha,
         body: `${reviewBody}\n\n> ⚠️ Algunos comentarios inline no pudieron anclarse y se omitieron.`,
         comments: [],
       })
@@ -170,7 +188,7 @@ export async function processReviewJob(
   markReviewed({
     repo: payload.repo,
     prNumber: payload.prNumber,
-    headSha: payload.headSha,
+    headSha,
     reviewId: review.id,
   })
 
@@ -181,7 +199,7 @@ export async function processReviewJob(
       payload.prNumber,
       buildSummaryComment({
         result: generated.result,
-        headSha: payload.headSha,
+        headSha,
         model: generated.model,
         reviewUrl: review.html_url,
         trigger: ACTION_LABEL[payload.action] ?? payload.action,
@@ -200,7 +218,7 @@ export async function processReviewJob(
   log.info("review.published", {
     repo: payload.repo,
     pr: payload.prNumber,
-    sha: payload.headSha.slice(0, 10),
+    sha: headSha.slice(0, 10),
     findings: generated.result.findings.length,
     inline: comments.length,
     unanchored: unanchored.length,
