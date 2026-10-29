@@ -54,3 +54,27 @@ bun run review:dry-run <owner/repo> <pr> # review sin publicar
 - Migraciones: `src/db/migrations/*.sql` se aplican al bootear.
 - Backups: retiene 7 por defecto.
 - Multi-instancia: SQLite en el mismo host; para varios hosts, DB compartida.
+
+## Deploy
+
+Push a `main` (directo o merge de un PR) o `workflow_dispatch`
+(`.github/workflows/deploy.yml`):
+
+1. `bun run check` y `bun test`.
+2. Imagen `linux/amd64` en GHCR: `ghcr.io/valentinvera/valentinvera-reviewer:<sha>` y `:latest`.
+3. Tailscale efímero (`tag:ci`) y `ssh deploy@$DEPLOY_HOST "valentinvera-reviewer <sha>"`.
+4. El server hace pull, `docker compose up -d --wait` y vuelve al tag anterior si el healthcheck falla.
+
+```bash
+# secrets
+DEPLOY_SSH_KEY=       # ed25519 del usuario deploy
+TS_OAUTH_CLIENT_ID=   # OAuth de Tailscale, nodos efímeros con tag:ci
+TS_OAUTH_SECRET=
+
+# variables
+DEPLOY_HOST=valen-ubuntu-server
+DEPLOY_KNOWN_HOSTS=   # línea de known_hosts, StrictHostKeyChecking=yes
+```
+
+- Environment del job: `production`.
+- El tag es el SHA completo del commit.
