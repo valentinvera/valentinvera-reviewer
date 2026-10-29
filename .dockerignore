@@ -1,0 +1,15 @@
+.git
+.github
+node_modules
+data
+secrets
+backups
+.env
+.env.*
+tests
+coverage
+dist
+out
+*.log
+.DS_Store
+.idea
