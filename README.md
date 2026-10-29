@@ -57,8 +57,8 @@ bun run review:dry-run <owner/repo> <pr> # review sin publicar
 
 ## Deploy
 
-Push a `main` (directo o merge de un PR) o `workflow_dispatch`
-(`.github/workflows/deploy.yml`):
+Cada push a `main` (directo o merge de un PR) o un `workflow_dispatch`
+corre `.github/workflows/deploy.yml` (un PR abierto no despliega):
 
 1. `bun run check` y `bun test`.
 2. Imagen `linux/amd64` en GHCR: `ghcr.io/valentinvera/valentinvera-reviewer:<sha>` y `:latest`.
