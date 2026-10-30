@@ -1,6 +1,8 @@
 import {
-  generateObject,
+  generateText,
   NoObjectGeneratedError,
+  NoOutputGeneratedError,
+  Output,
   type LanguageModel,
   type LanguageModelUsage,
 } from "ai"
@@ -154,11 +156,13 @@ async function callModel(input: ModelCallInput): Promise<{
   })
 
   try {
-    const generated = await generateObject({
+    const generated = await generateText({
       model: input.model,
-      schema: reviewResultSchema,
-      schemaName: "PullRequestReview",
-      schemaDescription: "Structured code review for a pull request diff.",
+      output: Output.object({
+        schema: reviewResultSchema,
+        name: "PullRequestReview",
+        description: "Structured code review for a pull request diff.",
+      }),
       system,
       prompt,
       temperature: 0.1,
@@ -167,9 +171,20 @@ async function callModel(input: ModelCallInput): Promise<{
       abortSignal: AbortSignal.timeout(240_000),
     })
 
-    return { result: normalizeResult(generated.object), usage: generated.usage }
+    let output: ReviewResult
+    try {
+      output = generated.output
+    } catch (error) {
+      if (NoOutputGeneratedError.isInstance(error)) {
+        throw new EmptyModelResponseError(generated.finishReason)
+      }
+      throw error
+    }
+
+    return { result: normalizeResult(output), usage: generated.usage }
   } catch (error) {
-    if (error instanceof NoObjectGeneratedError) {
+    if (error instanceof EmptyModelResponseError) throw error
+    if (NoObjectGeneratedError.isInstance(error)) {
       throw new EmptyModelResponseError(error.finishReason ?? undefined)
     }
     throw new Error(`AI review failed: ${errorMessage(error)}`)
