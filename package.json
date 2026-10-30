@@ -25,7 +25,7 @@
     "@ai-sdk/openai-compatible": "^3.0.78",
     "@octokit/app": "^16.1.4",
     "@octokit/webhooks": "^14.2.0",
-    "ai": "^7.0.153",
+    "ai": "^7.0.154",
     "octokit": "^5.0.5",
     "zod": "^4.6.7"
   },
