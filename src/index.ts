@@ -1,12 +1,11 @@
 import { config } from "./config"
 import { db, isQueueReady } from "./db"
+import { handleHealth } from "./health"
 import { errorMessage, log } from "./logger"
 import { queueStats, recoverStaleJobs } from "./queue"
 import { isWorkerRunning, startWorker } from "./worker"
 import { handleGitHubWebhook } from "./webhooks/github"
 import "./worker/handlers"
-
-const SERVICE = "valentinvera-reviewer"
 
 const recovered = recoverStaleJobs()
 if (recovered > 0) {
@@ -27,23 +26,8 @@ const server = Bun.serve({
   fetch(request) {
     const url = new URL(request.url)
 
-    if (request.method === "GET" && url.pathname === "/health") {
-      return Response.json({
-        ok: true,
-        service: SERVICE,
-        githubApp:
-          config.githubAppId && config.githubPrivateKey && config.githubWebhookSecret
-            ? "configured"
-            : "missing_credentials",
-        ai: config.opencodeApiKey ? "configured" : "missing_credentials",
-        model: config.aiModel,
-        database: config.databasePath,
-        queue: {
-          schema: isQueueReady() ? "ready" : "missing",
-          worker: workerStatus(),
-          ...queueStats(),
-        },
-      })
+    if ((request.method === "GET" || request.method === "HEAD") && url.pathname === "/health") {
+      return handleHealth(request)
     }
 
     if (request.method === "POST" && url.pathname === "/webhooks/github") {

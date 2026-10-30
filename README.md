@@ -55,6 +55,17 @@ bun run review:dry-run <owner/repo> <pr> # review sin publicar
 - Backups: retiene 7 por defecto.
 - Multi-instancia: SQLite en el mismo host; para varios hosts, DB compartida.
 
+## Health
+
+`GET /health` is public and returns a minimal JSON body. It never exposes
+credential status, model names, database paths, or queue statistics:
+
+- `200 {"ok":true,"service":"valentinvera-reviewer"}` when the queue schema is
+  ready and the worker is running.
+- `503 {"ok":false,"service":"valentinvera-reviewer"}` otherwise.
+
+`HEAD /health` returns the same status code with an empty body.
+
 ## Deploy
 
 Cada push a `main` (directo o merge de un PR) o un `workflow_dispatch`
