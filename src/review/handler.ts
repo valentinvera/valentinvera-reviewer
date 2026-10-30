@@ -7,6 +7,7 @@ import {
   buildRateLimitNotice,
   buildReviewBody,
   buildSummaryComment,
+  type RateLimitReason,
 } from "./markdown"
 import { getInstallationClient, isGitHubStatus, type ReviewGitHubClient } from "./publisher"
 import type { Finding } from "./schema"
@@ -51,8 +52,6 @@ const ACTION_LABEL: Record<string, string> = {
 
 const RATE_LIMIT_WINDOW_MS = 24 * 60 * 60 * 1000
 
-type RateLimitReason = "auto_per_pr_24h" | "manual_cooldown" | "manual_per_pr_24h" | "global_24h"
-
 function rateLimitReason(input: {
   repo: string
   prNumber: number
@@ -91,14 +90,14 @@ async function postRateLimitNotice(
   client: ReviewGitHubClient,
   repo: string,
   prNumber: number,
-  kind: ReviewRunKind,
+  reason: RateLimitReason,
   now: number,
 ): Promise<void> {
   const postedAt = getRateLimitNoticeAt(repo, prNumber)
   if (postedAt !== null && now - postedAt < RATE_LIMIT_WINDOW_MS) return
 
   try {
-    await client.createIssueComment(repo, prNumber, buildRateLimitNotice(kind))
+    await client.createIssueComment(repo, prNumber, buildRateLimitNotice(reason))
     markRateLimitNotice(repo, prNumber, now)
   } catch (error) {
     log.warn("review.rate_limit_notice_failed", {
@@ -230,7 +229,7 @@ export async function processReviewJob(
       limit,
     })
 
-    await postRateLimitNotice(client, payload.repo, payload.prNumber, kind, now)
+    await postRateLimitNotice(client, payload.repo, payload.prNumber, limit, now)
     return
   }
 

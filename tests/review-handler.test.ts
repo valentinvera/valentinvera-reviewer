@@ -365,6 +365,8 @@ describe("processReviewJob", () => {
     expect(aiCalls).toBe(0)
     expect(calls.reviews).toHaveLength(0)
     expect(calls.comments).toHaveLength(1)
+    expect(calls.comments[0]).toContain("límite global diario de reviews del bot")
+    expect(calls.comments[0]).not.toContain("este PR")
   })
 
   test("allows reviews when a limit is disabled with 0", async () => {
