@@ -12,6 +12,7 @@ export interface Config {
   publicUrl: string
   databasePath: string
   logLevel: LogLevel
+  maxRequestBodyBytes: number
 
   /** GitHub App */
   githubAppId: string | undefined
@@ -92,6 +93,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     publicUrl: str(env.PUBLIC_URL) ?? "http://localhost:3000",
     databasePath: str(env.DATABASE_PATH) ?? "./data/reviewer.db",
     logLevel: oneOf(env.LOG_LEVEL, ["debug", "info", "warn", "error"] as const, "info"),
+    maxRequestBodyBytes: int(env.MAX_REQUEST_BODY_BYTES, 10 * 1024 * 1024),
 
     githubAppId: str(env.GITHUB_APP_ID),
     githubAppSlug: str(env.GITHUB_APP_SLUG) ?? "valentinvera-reviewer",

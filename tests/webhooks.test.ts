@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test } from "bun:test"
+import { config } from "../src/config"
 import { db } from "../src/db"
 import { getWebhooks } from "../src/github"
 import { queueStats } from "../src/queue"
@@ -25,6 +26,7 @@ async function webhookRequest(input: {
   event?: string
   delivery?: string
   signature?: string
+  contentLength?: number
 }): Promise<Request> {
   const signature = input.signature ?? (await getWebhooks().sign(input.body))
 
@@ -35,6 +37,9 @@ async function webhookRequest(input: {
       "x-github-event": input.event ?? "pull_request",
       "x-github-delivery": input.delivery ?? "delivery-1",
       "x-hub-signature-256": signature,
+      ...(input.contentLength !== undefined
+        ? { "content-length": String(input.contentLength) }
+        : {}),
     },
     body: input.body,
   })
@@ -90,6 +95,36 @@ describe("POST /webhooks/github", () => {
 
     expect(response.status).toBe(400)
     expect(queueStats().queued).toBe(0)
+  })
+
+  test("rejects bodies over the configured limit via Content-Length", async () => {
+    const body = payloadWith()
+    const response = await handleGitHubWebhook(
+      await webhookRequest({ body, contentLength: config.maxRequestBodyBytes + 1 }),
+    )
+
+    expect(response.status).toBe(413)
+    expect(await response.json()).toEqual({ error: "payload_too_large" })
+    expect(queueStats().queued).toBe(0)
+  })
+
+  test("rejects bodies over the configured limit without Content-Length", async () => {
+    const body = "x".repeat(config.maxRequestBodyBytes + 1)
+    const response = await handleGitHubWebhook(await webhookRequest({ body }))
+
+    expect(response.status).toBe(413)
+    expect(await response.json()).toEqual({ error: "payload_too_large" })
+    expect(queueStats().queued).toBe(0)
+  })
+
+  test("accepts a body within the configured limit", async () => {
+    const body = payloadWith()
+    const response = await handleGitHubWebhook(
+      await webhookRequest({ body, contentLength: body.length }),
+    )
+
+    expect(response.status).toBe(202)
+    expect(queueStats().queued).toBe(1)
   })
 
   test("acknowledges ping", async () => {

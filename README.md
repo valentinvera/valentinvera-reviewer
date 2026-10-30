@@ -14,6 +14,7 @@ HOST=0.0.0.0
 PUBLIC_URL=https://api.valentinvera.dev
 DATABASE_PATH=./data/reviewer.db
 LOG_LEVEL=info
+MAX_REQUEST_BODY_BYTES=10485760 # max HTTP request body size in bytes (10 MB)
 
 GITHUB_APP_ID=
 GITHUB_PRIVATE_KEY_PATH=./secrets/valentinvera-reviewer.pem

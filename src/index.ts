@@ -22,6 +22,7 @@ function workerStatus(): "running" | "stopped" | "disabled" {
 const server = Bun.serve({
   port: config.port,
   hostname: config.hostname,
+  maxRequestBodySize: config.maxRequestBodyBytes,
 
   fetch(request) {
     const url = new URL(request.url)
