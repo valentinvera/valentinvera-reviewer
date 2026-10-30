@@ -1,15 +1,27 @@
+import { config } from "../config"
 import { log, errorMessage } from "../logger"
 import { canAnchor, indexUnifiedDiff } from "./diff"
 import { generateReview } from "./engine"
-import { buildInlineComment, buildReviewBody, buildSummaryComment } from "./markdown"
+import {
+  buildInlineComment,
+  buildRateLimitNotice,
+  buildReviewBody,
+  buildSummaryComment,
+} from "./markdown"
 import { getInstallationClient, isGitHubStatus, type ReviewGitHubClient } from "./publisher"
 import type { Finding } from "./schema"
 import {
   clearSummaryCommentId,
+  countReviewRuns,
+  getLastReviewRunAt,
+  getRateLimitNoticeAt,
   getSummaryCommentId,
   hasReviewed,
+  markRateLimitNotice,
   markReviewed,
+  recordReviewRun,
   setSummaryCommentId,
+  type ReviewRunKind,
 } from "./store"
 
 export interface ReviewJobPayload {
@@ -35,6 +47,66 @@ const ACTION_LABEL: Record<string, string> = {
   reopened: "PR reabierto",
   ready_for_review: "listo para review",
   manual: "manual",
+}
+
+const RATE_LIMIT_WINDOW_MS = 24 * 60 * 60 * 1000
+
+type RateLimitReason = "auto_per_pr_24h" | "manual_cooldown" | "manual_per_pr_24h" | "global_24h"
+
+function rateLimitReason(input: {
+  repo: string
+  prNumber: number
+  kind: ReviewRunKind
+  now: number
+}): RateLimitReason | null {
+  const { repo, prNumber, kind, now } = input
+  const since = now - RATE_LIMIT_WINDOW_MS
+
+  if (kind === "manual" && config.reviewManualCooldownSeconds > 0) {
+    const previous = getLastReviewRunAt(repo, prNumber, "manual")
+    if (previous !== null && now - previous < config.reviewManualCooldownSeconds * 1000) {
+      return "manual_cooldown"
+    }
+  }
+
+  if (kind === "auto" && config.reviewAutoMaxPerPr24h > 0) {
+    const count = countReviewRuns({ repo, prNumber, kind, since })
+    if (count >= config.reviewAutoMaxPerPr24h) return "auto_per_pr_24h"
+  }
+
+  if (kind === "manual" && config.reviewManualMaxPerPr24h > 0) {
+    const count = countReviewRuns({ repo, prNumber, kind, since })
+    if (count >= config.reviewManualMaxPerPr24h) return "manual_per_pr_24h"
+  }
+
+  if (config.reviewGlobalMax24h > 0) {
+    const count = countReviewRuns({ since })
+    if (count >= config.reviewGlobalMax24h) return "global_24h"
+  }
+
+  return null
+}
+
+async function postRateLimitNotice(
+  client: ReviewGitHubClient,
+  repo: string,
+  prNumber: number,
+  kind: ReviewRunKind,
+  now: number,
+): Promise<void> {
+  const postedAt = getRateLimitNoticeAt(repo, prNumber)
+  if (postedAt !== null && now - postedAt < RATE_LIMIT_WINDOW_MS) return
+
+  try {
+    await client.createIssueComment(repo, prNumber, buildRateLimitNotice(kind))
+    markRateLimitNotice(repo, prNumber, now)
+  } catch (error) {
+    log.warn("review.rate_limit_notice_failed", {
+      repo,
+      pr: prNumber,
+      error: errorMessage(error),
+    })
+  }
 }
 
 function partitionFindings(
@@ -140,6 +212,34 @@ export async function processReviewJob(
     log.info("review.skip.empty_diff", { repo: payload.repo, pr: payload.prNumber })
     return
   }
+
+  const kind: ReviewRunKind = payload.force ? "manual" : "auto"
+  const now = Date.now()
+  const limit = rateLimitReason({
+    repo: payload.repo,
+    prNumber: payload.prNumber,
+    kind,
+    now,
+  })
+
+  if (limit !== null) {
+    log.warn("review.rate_limited", {
+      repo: payload.repo,
+      pr: payload.prNumber,
+      kind,
+      limit,
+    })
+
+    await postRateLimitNotice(client, payload.repo, payload.prNumber, kind, now)
+    return
+  }
+
+  recordReviewRun({
+    repo: payload.repo,
+    prNumber: payload.prNumber,
+    kind,
+    createdAt: now,
+  })
 
   const generated = await generate({ repo: payload.repo, pr, diff })
   const { anchored, unanchored } = partitionFindings(generated.result.findings, diff)

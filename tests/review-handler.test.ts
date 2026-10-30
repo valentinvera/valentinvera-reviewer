@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { config } from "../src/config"
 import { db } from "../src/db"
 import type { GeneratedReview } from "../src/review/engine"
 import { processReviewJob, type ReviewJobPayload } from "../src/review/handler"
@@ -7,7 +8,14 @@ import type {
   PullRequestForReview,
   ReviewGitHubClient,
 } from "../src/review/publisher"
-import { getSummaryCommentId, hasReviewed, setSummaryCommentId } from "../src/review/store"
+import {
+  countReviewRuns,
+  getSummaryCommentId,
+  hasReviewed,
+  recordReviewRun,
+  setSummaryCommentId,
+  type ReviewRunKind,
+} from "../src/review/store"
 
 const pr: PullRequestForReview = {
   number: 51,
@@ -102,8 +110,41 @@ function fakeClient(overrides: Partial<ReviewGitHubClient> = {}) {
   return { client, calls }
 }
 
+const rateLimitDefaults = {
+  reviewAutoMaxPerPr24h: config.reviewAutoMaxPerPr24h,
+  reviewManualCooldownSeconds: config.reviewManualCooldownSeconds,
+  reviewManualMaxPerPr24h: config.reviewManualMaxPerPr24h,
+  reviewGlobalMax24h: config.reviewGlobalMax24h,
+}
+
+function seedRuns(input: {
+  repo?: string
+  prNumber?: number
+  kind?: ReviewRunKind
+  count: number
+  createdAt?: number
+}) {
+  for (let index = 0; index < input.count; index += 1) {
+    recordReviewRun({
+      repo: input.repo ?? payload.repo,
+      prNumber: input.prNumber ?? payload.prNumber,
+      kind: input.kind ?? "auto",
+      createdAt: input.createdAt ?? Date.now(),
+    })
+  }
+}
+
 beforeEach(() => {
-  db.exec("DELETE FROM reviewed_commits; DELETE FROM summary_comments")
+  db.exec(
+    "DELETE FROM reviewed_commits; DELETE FROM summary_comments; DELETE FROM review_runs; DELETE FROM review_rate_limit_notices",
+  )
+})
+
+afterEach(() => {
+  config.reviewAutoMaxPerPr24h = rateLimitDefaults.reviewAutoMaxPerPr24h
+  config.reviewManualCooldownSeconds = rateLimitDefaults.reviewManualCooldownSeconds
+  config.reviewManualMaxPerPr24h = rateLimitDefaults.reviewManualMaxPerPr24h
+  config.reviewGlobalMax24h = rateLimitDefaults.reviewGlobalMax24h
 })
 
 describe("processReviewJob", () => {
@@ -225,5 +266,148 @@ describe("processReviewJob", () => {
     )
 
     expect(calls.reviews).toHaveLength(2)
+  })
+
+  test("blocks automatic reviews when the per-PR 24h limit is reached", async () => {
+    config.reviewAutoMaxPerPr24h = 2
+    seedRuns({ kind: "auto", count: 2 })
+
+    let aiCalls = 0
+    const { client, calls } = fakeClient()
+
+    await processReviewJob(payload, {
+      getClient: async () => client,
+      generateReview: async () => {
+        aiCalls += 1
+        return generated
+      },
+    })
+
+    expect(aiCalls).toBe(0)
+    expect(calls.reviews).toHaveLength(0)
+    expect(calls.comments).toHaveLength(1)
+    expect(
+      countReviewRuns({
+        repo: payload.repo,
+        prNumber: payload.prNumber,
+        kind: "auto",
+        since: Date.now() - 24 * 60 * 60 * 1000,
+      }),
+    ).toBe(2)
+  })
+
+  test("refuses a manual review during the cooldown window", async () => {
+    recordReviewRun({
+      repo: payload.repo,
+      prNumber: payload.prNumber,
+      kind: "manual",
+      createdAt: Date.now() - 1_000,
+    })
+
+    let aiCalls = 0
+    const { client, calls } = fakeClient()
+
+    await processReviewJob(
+      { ...payload, headSha: "", action: "manual", force: true },
+      {
+        getClient: async () => client,
+        generateReview: async () => {
+          aiCalls += 1
+          return generated
+        },
+      },
+    )
+
+    expect(aiCalls).toBe(0)
+    expect(calls.reviews).toHaveLength(0)
+    expect(calls.comments).toHaveLength(1)
+  })
+
+  test("blocks manual reviews when the per-PR 24h limit is reached", async () => {
+    config.reviewManualCooldownSeconds = 0
+    config.reviewManualMaxPerPr24h = 2
+    seedRuns({ kind: "manual", count: 2 })
+
+    let aiCalls = 0
+    const { client, calls } = fakeClient()
+
+    await processReviewJob(
+      { ...payload, headSha: "", action: "manual", force: true },
+      {
+        getClient: async () => client,
+        generateReview: async () => {
+          aiCalls += 1
+          return generated
+        },
+      },
+    )
+
+    expect(aiCalls).toBe(0)
+    expect(calls.reviews).toHaveLength(0)
+    expect(calls.comments).toHaveLength(1)
+  })
+
+  test("blocks reviews when the global 24h limit is reached", async () => {
+    config.reviewGlobalMax24h = 2
+    seedRuns({ repo: "other/repo", prNumber: 7, kind: "auto", count: 2 })
+
+    let aiCalls = 0
+    const { client, calls } = fakeClient()
+
+    await processReviewJob(payload, {
+      getClient: async () => client,
+      generateReview: async () => {
+        aiCalls += 1
+        return generated
+      },
+    })
+
+    expect(aiCalls).toBe(0)
+    expect(calls.reviews).toHaveLength(0)
+    expect(calls.comments).toHaveLength(1)
+  })
+
+  test("allows reviews when a limit is disabled with 0", async () => {
+    config.reviewAutoMaxPerPr24h = 0
+    seedRuns({ kind: "auto", count: 10 })
+
+    const { client, calls } = fakeClient()
+
+    await processReviewJob(payload, {
+      getClient: async () => client,
+      generateReview: async () => generated,
+    })
+
+    expect(calls.reviews).toHaveLength(1)
+    expect(
+      countReviewRuns({
+        repo: payload.repo,
+        prNumber: payload.prNumber,
+        kind: "auto",
+        since: Date.now() - 24 * 60 * 60 * 1000,
+      }),
+    ).toBe(11)
+  })
+
+  test("posts the rate limit notice only once per PR per 24h", async () => {
+    config.reviewAutoMaxPerPr24h = 1
+    seedRuns({ kind: "auto", count: 1 })
+
+    let aiCalls = 0
+    const { client, calls } = fakeClient()
+
+    for (let run = 0; run < 2; run += 1) {
+      await processReviewJob(payload, {
+        getClient: async () => client,
+        generateReview: async () => {
+          aiCalls += 1
+          return generated
+        },
+      })
+    }
+
+    expect(aiCalls).toBe(0)
+    expect(calls.reviews).toHaveLength(0)
+    expect(calls.comments).toHaveLength(1)
   })
 })

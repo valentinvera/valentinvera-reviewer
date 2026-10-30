@@ -1,3 +1,4 @@
+import { config } from "../config"
 import type { Finding, ReviewResult } from "./schema"
 
 const SEVERITY_LABEL: Record<Finding["severity"], string> = {
@@ -48,6 +49,18 @@ export function buildReviewBody(input: {
   )
 
   return sections.join("\n\n")
+}
+
+export function buildRateLimitNotice(kind: "auto" | "manual"): string {
+  if (config.reviewLanguage === "en") {
+    return kind === "auto"
+      ? "⏳ Automatic review limit reached for this pull request. Reviews will resume once the 24-hour window allows."
+      : "⏳ Manual review limit reached for this pull request. Please try again later."
+  }
+
+  return kind === "auto"
+    ? "⏳ Se alcanzó el límite de reviews automáticos de este PR. Se reanudarán cuando lo permita la ventana de 24 horas."
+    : "⏳ Se alcanzó el límite de reviews manuales de este PR. Intentá de nuevo más tarde."
 }
 
 export function buildSummaryComment(input: {
