@@ -1,5 +1,5 @@
 # Bun version matches .github/workflows/ci.yml.
-FROM oven/bun:1.4.0 AS deps
+FROM oven/bun:1.4.4 AS deps
 
 WORKDIR /app
 
@@ -11,7 +11,7 @@ COPY package.json bun.lock ./
 RUN bun -e 'const pkg = await Bun.file("package.json").json(); delete pkg.scripts.prepare; await Bun.write("package.json", JSON.stringify(pkg))' \
     && bun install --frozen-lockfile --production
 
-FROM oven/bun:1.4.0
+FROM oven/bun:1.4.4
 
 WORKDIR /app
 
