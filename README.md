@@ -94,3 +94,16 @@ DEPLOY_KNOWN_HOSTS=   # línea de known_hosts, StrictHostKeyChecking=yes
 
 - Environment del job: `production`.
 - El tag es el SHA completo del commit.
+
+## Security
+
+- CI (`.github/workflows/ci.yml`) builds the production image on every pull
+  request and on pushes to `main`, then scans it with
+  [Trivy](https://github.com/aquasecurity/trivy) for `CRITICAL` and `HIGH`
+  vulnerabilities in OS packages and libraries. Fixable findings fail the job.
+- `.github/dependabot.yml` opens weekly update pull requests for Bun
+  dependencies, GitHub Actions and the Docker base image.
+- The deployed server image is also scanned weekly by an external Trivy job
+  that runs outside this repository.
+- The runtime image applies available Debian security updates at build time
+  before switching to the non-root `bun` user.
