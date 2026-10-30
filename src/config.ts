@@ -42,6 +42,11 @@ export interface Config {
   reviewMaxDiffChars: number
   reviewMaxFindings: number
   reviewChunkChars: number
+  /** Rate limits. A value of 0 disables the corresponding limit. */
+  reviewAutoMaxPerPr24h: number
+  reviewManualCooldownSeconds: number
+  reviewManualMaxPerPr24h: number
+  reviewGlobalMax24h: number
 }
 
 function str(value: string | undefined): string | undefined {
@@ -117,6 +122,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     reviewMaxDiffChars: int(env.REVIEW_MAX_DIFF_CHARS, 240_000),
     reviewMaxFindings: int(env.REVIEW_MAX_FINDINGS, 12),
     reviewChunkChars: int(env.REVIEW_CHUNK_CHARS, 16_000),
+    reviewAutoMaxPerPr24h: int(env.REVIEW_AUTO_MAX_PER_PR_24H, 10),
+    reviewManualCooldownSeconds: int(env.REVIEW_MANUAL_COOLDOWN_SECONDS, 600),
+    reviewManualMaxPerPr24h: int(env.REVIEW_MANUAL_MAX_PER_PR_24H, 5),
+    reviewGlobalMax24h: int(env.REVIEW_GLOBAL_MAX_24H, 50),
   }
 }
 
