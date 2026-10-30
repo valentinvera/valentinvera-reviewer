@@ -18,6 +18,7 @@ describe("loadConfig", () => {
     expect(config.reviewMaxDiffChars).toBe(240_000)
     expect(config.reviewMaxFindings).toBe(12)
     expect(config.reviewChunkChars).toBe(16_000)
+    expect(config.maxRequestBodyBytes).toBe(10 * 1024 * 1024)
   })
 
   test("parses overrides", () => {
@@ -33,6 +34,7 @@ describe("loadConfig", () => {
       JOB_MAX_ATTEMPTS: "5",
       AI_REASONING_MODE: "low",
       LOG_LEVEL: "debug",
+      MAX_REQUEST_BODY_BYTES: "2048",
     })
 
     expect(config.port).toBe(4000)
@@ -46,6 +48,7 @@ describe("loadConfig", () => {
     expect(config.jobMaxAttempts).toBe(5)
     expect(config.aiReasoningMode).toBe("low")
     expect(config.logLevel).toBe("debug")
+    expect(config.maxRequestBodyBytes).toBe(2_048)
   })
 
   test("falls back on invalid values", () => {
@@ -54,11 +57,13 @@ describe("loadConfig", () => {
       WORKER_CONCURRENCY: "0",
       AI_REASONING_MODE: "invalid",
       LOG_LEVEL: "invalid",
+      MAX_REQUEST_BODY_BYTES: "not-a-number",
     })
 
     expect(config.port).toBe(3000)
     expect(config.workerConcurrency).toBe(1)
     expect(config.aiReasoningMode).toBe("off")
     expect(config.logLevel).toBe("info")
+    expect(config.maxRequestBodyBytes).toBe(10 * 1024 * 1024)
   })
 })
