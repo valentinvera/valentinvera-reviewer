@@ -29,6 +29,10 @@ REVIEW_LANGUAGE=es
 REVIEW_MAX_DIFF_CHARS=240000
 REVIEW_MAX_FINDINGS=12
 REVIEW_CHUNK_CHARS=16000
+REVIEW_AUTO_MAX_PER_PR_24H=10 # max automatic reviews per PR in a rolling 24h window (0 disables)
+REVIEW_MANUAL_COOLDOWN_SECONDS=600 # min seconds between manual reviews on the same PR (0 disables)
+REVIEW_MANUAL_MAX_PER_PR_24H=5 # max manual reviews per PR in a rolling 24h window (0 disables)
+REVIEW_GLOBAL_MAX_24H=50 # max reviews (auto + manual) across all repos in a rolling 24h window (0 disables)
 
 QUEUE_POLL_MS=1000
 JOB_MAX_ATTEMPTS=3
