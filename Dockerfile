@@ -24,6 +24,12 @@ COPY --chown=bun:bun scripts ./scripts
 
 RUN mkdir -p /app/data && chown bun:bun /app /app/data
 
+# The pinned base image ships outdated Debian packages. Apply the available
+# security updates here and drop the package lists to keep the layer small.
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && rm -rf /var/lib/apt/lists/*
+
 USER bun
 
 EXPOSE 3000
