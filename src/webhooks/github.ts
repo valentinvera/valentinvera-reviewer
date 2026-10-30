@@ -159,12 +159,33 @@ export async function handleGitHubWebhook(request: Request): Promise<Response> {
     return json({ error: "missing_webhook_headers" }, 400)
   }
 
+  const declaredLength = Number.parseInt(request.headers.get("content-length") ?? "", 10)
+  if (Number.isFinite(declaredLength) && declaredLength > config.maxRequestBodyBytes) {
+    log.warn("webhook.payload_too_large", {
+      delivery: deliveryId,
+      event,
+      contentLength: declaredLength,
+      limit: config.maxRequestBodyBytes,
+    })
+    return json({ error: "payload_too_large" }, 413)
+  }
+
   let payload: string
   try {
     payload = await request.text()
   } catch (error) {
     log.error("webhook.read_failed", { delivery: deliveryId, event, error: errorMessage(error) })
     return json({ error: "invalid_body" }, 400)
+  }
+
+  if (Buffer.byteLength(payload) > config.maxRequestBodyBytes) {
+    log.warn("webhook.payload_too_large", {
+      delivery: deliveryId,
+      event,
+      size: Buffer.byteLength(payload),
+      limit: config.maxRequestBodyBytes,
+    })
+    return json({ error: "payload_too_large" }, 413)
   }
 
   if (!payload) {
