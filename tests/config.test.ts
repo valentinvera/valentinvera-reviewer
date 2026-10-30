@@ -18,6 +18,10 @@ describe("loadConfig", () => {
     expect(config.reviewMaxDiffChars).toBe(240_000)
     expect(config.reviewMaxFindings).toBe(12)
     expect(config.reviewChunkChars).toBe(16_000)
+    expect(config.reviewAutoMaxPerPr24h).toBe(10)
+    expect(config.reviewManualCooldownSeconds).toBe(600)
+    expect(config.reviewManualMaxPerPr24h).toBe(5)
+    expect(config.reviewGlobalMax24h).toBe(50)
     expect(config.maxRequestBodyBytes).toBe(10 * 1024 * 1024)
   })
 
@@ -31,6 +35,10 @@ describe("loadConfig", () => {
       REVIEW_MAX_DIFF_CHARS: "1000",
       REVIEW_MAX_FINDINGS: "5",
       REVIEW_CHUNK_CHARS: "8000",
+      REVIEW_AUTO_MAX_PER_PR_24H: "7",
+      REVIEW_MANUAL_COOLDOWN_SECONDS: "120",
+      REVIEW_MANUAL_MAX_PER_PR_24H: "3",
+      REVIEW_GLOBAL_MAX_24H: "25",
       JOB_MAX_ATTEMPTS: "5",
       AI_REASONING_MODE: "low",
       LOG_LEVEL: "debug",
@@ -45,6 +53,10 @@ describe("loadConfig", () => {
     expect(config.reviewMaxDiffChars).toBe(1_000)
     expect(config.reviewMaxFindings).toBe(5)
     expect(config.reviewChunkChars).toBe(8_000)
+    expect(config.reviewAutoMaxPerPr24h).toBe(7)
+    expect(config.reviewManualCooldownSeconds).toBe(120)
+    expect(config.reviewManualMaxPerPr24h).toBe(3)
+    expect(config.reviewGlobalMax24h).toBe(25)
     expect(config.jobMaxAttempts).toBe(5)
     expect(config.aiReasoningMode).toBe("low")
     expect(config.logLevel).toBe("debug")
