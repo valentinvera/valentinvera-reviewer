@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import {
   AI_MAX_OUTPUT_TOKENS_CAP,
+  AI_TIMEOUT_MS_CAP,
   DEFAULT_AI_MAX_OUTPUT_TOKENS,
   DEFAULT_AI_TIMEOUT_MS,
   DEFAULT_REVIEW_SKIP_AUTHORS,
@@ -103,6 +104,11 @@ describe("loadConfig", () => {
     for (const value of ["0", "-1", "abc", ""]) {
       expect(loadConfig({ AI_TIMEOUT_MS: value }).aiTimeoutMs).toBe(DEFAULT_AI_TIMEOUT_MS)
     }
+  })
+
+  test("caps AI_TIMEOUT_MS at 30 minutes", () => {
+    expect(loadConfig({ AI_TIMEOUT_MS: "1800000" }).aiTimeoutMs).toBe(1_800_000)
+    expect(loadConfig({ AI_TIMEOUT_MS: "99999999999" }).aiTimeoutMs).toBe(AI_TIMEOUT_MS_CAP)
   })
 
   test("caps AI_MAX_OUTPUT_TOKENS at the model's documented output limit", () => {
