@@ -72,6 +72,11 @@ const generated: GeneratedReview = {
   usage: undefined,
 }
 
+const clean: GeneratedReview = {
+  ...generated,
+  result: { summary: "Looks good.", verdict: "looks_good", findings: [] },
+}
+
 const payload: ReviewJobPayload = {
   installationId: 99,
   repo: "valentinvera/plata",
@@ -165,8 +170,90 @@ describe("processReviewJob", () => {
     expect(calls.reviews[0]?.body).toContain("**Reviewed commit:** `abc123def4`")
     expect(calls.reviews[0]?.body).not.toContain("Summary text")
     expect(calls.comments).toHaveLength(1)
-    expect(calls.comments[0]).toContain("valentinvera-reviewer")
+    expect(calls.comments[0]).toContain("## Code Review Summary")
+    expect(calls.comments[0]).toContain("💡 Completed, 2 findings")
+    expect(calls.comments[0]).toContain("[📝 Code Review](https://github.com/review/1)")
+    expect(calls.comments[0]).toContain("| PR opened |")
     expect(hasReviewed(payload.repo, payload.prNumber, payload.headSha!)).toBe(true)
+  })
+
+  test("posts only a summary comment when the review finds no issues", async () => {
+    const { client, calls } = fakeClient()
+
+    await processReviewJob(payload, {
+      getClient: async () => client,
+      generateReview: async () => clean,
+    })
+
+    expect(calls.reviews).toHaveLength(0)
+    expect(calls.comments).toHaveLength(1)
+    expect(calls.comments[0]).toContain("## Code Review Summary")
+    expect(calls.comments[0]).toContain(
+      "| 📝 Code Review | ✅ Completed, no issues found | `abc123def4` | PR opened |",
+    )
+    expect(calls.comments[0]).toContain("No issues found. Nice work! 🎉")
+    expect(getSummaryCommentId(payload.repo, payload.prNumber)).toBe(10)
+    expect(hasReviewed(payload.repo, payload.prNumber, payload.headSha!)).toBe(true)
+  })
+
+  test("updates the existing summary comment on a clean manual review", async () => {
+    setSummaryCommentId(payload.repo, payload.prNumber, 55)
+    const { client, calls } = fakeClient()
+
+    await processReviewJob(
+      { ...payload, headSha: "", action: "manual", force: true },
+      {
+        getClient: async () => client,
+        generateReview: async () => clean,
+      },
+    )
+
+    expect(calls.reviews).toHaveLength(0)
+    expect(calls.comments).toHaveLength(0)
+    expect(calls.updates).toHaveLength(1)
+    expect(calls.updates[0]?.id).toBe(55)
+    expect(calls.updates[0]?.body).toContain("| /review command |")
+  })
+
+  test("maps the webhook action to the review trigger label", async () => {
+    const cases: Array<[string, string]> = [
+      ["synchronize", "New commits pushed"],
+      ["reopened", "PR reopened"],
+      ["ready_for_review", "Ready for review"],
+    ]
+
+    for (const [action, label] of cases) {
+      db.exec("DELETE FROM reviewed_commits; DELETE FROM summary_comments")
+      const { client, calls } = fakeClient()
+
+      await processReviewJob(
+        { ...payload, action },
+        {
+          getClient: async () => client,
+          generateReview: async () => clean,
+        },
+      )
+
+      expect(calls.comments[0]).toContain(`| ${label} |`)
+    }
+  })
+
+  test("does not mark a clean review as done when the summary comment fails", async () => {
+    const { client, calls } = fakeClient({
+      createIssueComment: async () => {
+        throw { status: 500 }
+      },
+    })
+
+    await expect(
+      processReviewJob(payload, {
+        getClient: async () => client,
+        generateReview: async () => clean,
+      }),
+    ).rejects.toEqual({ status: 500 })
+
+    expect(calls.reviews).toHaveLength(0)
+    expect(hasReviewed(payload.repo, payload.prNumber, payload.headSha!)).toBe(false)
   })
 
   test("does not review the same head sha twice", async () => {

@@ -1,5 +1,8 @@
 import { config } from "../config"
-import type { Finding, ReviewResult } from "./schema"
+import type { Finding } from "./schema"
+
+const TRUNCATED_NOTICE =
+  "> ⚠️ The diff exceeded the configured size limit, so only part of it was reviewed."
 
 const SEVERITY_LABEL: Record<Finding["severity"], string> = {
   critical: "🔴 critical",
@@ -82,24 +85,40 @@ export function buildRateLimitNotice(reason: RateLimitReason): string {
   }
 }
 
+/**
+ * Status comment that is created once per PR and updated on every review.
+ * When the review found nothing, this comment is the only output.
+ */
 export function buildSummaryComment(input: {
-  result: ReviewResult
+  findingsCount: number
   headSha: string
   model: string
-  reviewUrl: string
+  /** Link to the published review; null when no review was posted. */
+  reviewUrl: string | null
   trigger: string
+  truncated: boolean
 }): string {
-  const status = input.result.findings.length === 0 ? "✅ Sin hallazgos" : "📝 Revisado"
+  const clean = input.findingsCount === 0
+  const review = input.reviewUrl ? `[📝 Code Review](${input.reviewUrl})` : "📝 Code Review"
+  const status = clean
+    ? "✅ Completed, no issues found"
+    : `💡 Completed, ${pluralize(input.findingsCount, "finding")}`
+
   const lines = [
-    "### 🤖 valentinvera-reviewer",
+    "## Code Review Summary",
     "",
-    "| Estado | Commit | Hallazgos | Disparador |",
+    "This comment shows the latest review activity on this pull request.",
+    "",
+    "| Review | Status | Commit | Review trigger |",
     "| --- | --- | --- | --- |",
-    `| ${status} | \`${input.headSha.slice(0, 10)}\` | ${input.result.findings.length} | ${input.trigger} |`,
+    `| ${review} | ${status} | \`${shortSha(input.headSha)}\` | ${input.trigger} |`,
     "",
-    `[Ver review completa](${input.reviewUrl})`,
+    clean
+      ? "No issues found. Nice work! 🎉"
+      : "See the inline comments in the review for the suggested changes.",
     "",
-    `<sub>${input.model} · este comentario se actualiza en cada push</sub>`,
+    ...(input.truncated ? [TRUNCATED_NOTICE, ""] : []),
+    `<sub>${input.model} · this comment is updated on every review · comment \`/review\` to run it again</sub>`,
   ]
 
   return lines.join("\n")
