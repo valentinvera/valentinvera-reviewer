@@ -138,10 +138,17 @@ describe("generateReview", () => {
   })
 
   test("sends the configured output budget to the model", async () => {
-    const model = mockModel()
-    await generateReview({ repo: "valentinvera/plata", pr, diff, model })
+    const original = config.aiMaxOutputTokens
+    config.aiMaxOutputTokens = 20_480
 
-    expect(model.doGenerateCalls[0]?.maxOutputTokens).toBe(config.aiMaxOutputTokens)
+    try {
+      const model = mockModel()
+      await generateReview({ repo: "valentinvera/plata", pr, diff, model })
+
+      expect(model.doGenerateCalls[0]?.maxOutputTokens).toBe(20_480)
+    } finally {
+      config.aiMaxOutputTokens = original
+    }
   })
 
   test("uses the configured output budget for every diff chunk", async () => {
