@@ -45,7 +45,7 @@ const diff = `diff --git a/src/a.ts b/src/a.ts
 
 const generated: GeneratedReview = {
   result: {
-    summary: "Resumen",
+    summary: "Summary text",
     verdict: "needs_changes",
     findings: [
       {
@@ -53,7 +53,7 @@ const generated: GeneratedReview = {
         line: 1,
         side: "RIGHT",
         severity: "high",
-        title: "Uno",
+        title: "One",
         body: "Body",
       },
       {
@@ -61,7 +61,7 @@ const generated: GeneratedReview = {
         line: 99,
         side: "RIGHT",
         severity: "low",
-        title: "Dos",
+        title: "Two",
         body: "Body2",
       },
     ],
@@ -70,6 +70,11 @@ const generated: GeneratedReview = {
   model: "mock-model",
   durationMs: 1,
   usage: undefined,
+}
+
+const clean: GeneratedReview = {
+  ...generated,
+  result: { summary: "Looks good.", verdict: "looks_good", findings: [] },
 }
 
 const payload: ReviewJobPayload = {
@@ -159,12 +164,96 @@ describe("processReviewJob", () => {
     expect(calls.reviews).toHaveLength(1)
     expect(calls.reviews[0]?.comments).toHaveLength(1)
     expect(calls.reviews[0]?.comments[0]?.path).toBe("src/a.ts")
-    expect(calls.reviews[0]?.body).toContain("Observaciones generales")
-    expect(calls.reviews[0]?.body).toContain("Dos")
-    expect(calls.reviews[0]?.body).toContain("Review automático")
+    expect(calls.reviews[0]?.body).toContain("General findings")
+    expect(calls.reviews[0]?.body).toContain("Two")
+    expect(calls.reviews[0]?.body).toContain("### 💡 Code Review")
+    expect(calls.reviews[0]?.body).toContain("**Reviewed commit:** `abc123def4`")
+    expect(calls.reviews[0]?.body).not.toContain("Summary text")
     expect(calls.comments).toHaveLength(1)
-    expect(calls.comments[0]).toContain("valentinvera-reviewer")
+    expect(calls.comments[0]).toContain("## Code Review Summary")
+    expect(calls.comments[0]).toContain("💡 Completed, 2 findings")
+    expect(calls.comments[0]).toContain("[📝 Code Review](https://github.com/review/1)")
+    expect(calls.comments[0]).toContain("| PR opened |")
     expect(hasReviewed(payload.repo, payload.prNumber, payload.headSha!)).toBe(true)
+  })
+
+  test("posts only a summary comment when the review finds no issues", async () => {
+    const { client, calls } = fakeClient()
+
+    await processReviewJob(payload, {
+      getClient: async () => client,
+      generateReview: async () => clean,
+    })
+
+    expect(calls.reviews).toHaveLength(0)
+    expect(calls.comments).toHaveLength(1)
+    expect(calls.comments[0]).toContain("## Code Review Summary")
+    expect(calls.comments[0]).toContain(
+      "| 📝 Code Review | ✅ Completed, no issues found | `abc123def4` | PR opened |",
+    )
+    expect(calls.comments[0]).toContain("No issues found. Nice work! 🎉")
+    expect(getSummaryCommentId(payload.repo, payload.prNumber)).toBe(10)
+    expect(hasReviewed(payload.repo, payload.prNumber, payload.headSha!)).toBe(true)
+  })
+
+  test("updates the existing summary comment on a clean manual review", async () => {
+    setSummaryCommentId(payload.repo, payload.prNumber, 55)
+    const { client, calls } = fakeClient()
+
+    await processReviewJob(
+      { ...payload, headSha: "", action: "manual", force: true },
+      {
+        getClient: async () => client,
+        generateReview: async () => clean,
+      },
+    )
+
+    expect(calls.reviews).toHaveLength(0)
+    expect(calls.comments).toHaveLength(0)
+    expect(calls.updates).toHaveLength(1)
+    expect(calls.updates[0]?.id).toBe(55)
+    expect(calls.updates[0]?.body).toContain("| /review command |")
+  })
+
+  test("maps the webhook action to the review trigger label", async () => {
+    const cases: Array<[string, string]> = [
+      ["synchronize", "New commits pushed"],
+      ["reopened", "PR reopened"],
+      ["ready_for_review", "Ready for review"],
+    ]
+
+    for (const [action, label] of cases) {
+      db.exec("DELETE FROM reviewed_commits; DELETE FROM summary_comments")
+      const { client, calls } = fakeClient()
+
+      await processReviewJob(
+        { ...payload, action },
+        {
+          getClient: async () => client,
+          generateReview: async () => clean,
+        },
+      )
+
+      expect(calls.comments[0]).toContain(`| ${label} |`)
+    }
+  })
+
+  test("does not mark a clean review as done when the summary comment fails", async () => {
+    const { client, calls } = fakeClient({
+      createIssueComment: async () => {
+        throw { status: 500 }
+      },
+    })
+
+    await expect(
+      processReviewJob(payload, {
+        getClient: async () => client,
+        generateReview: async () => clean,
+      }),
+    ).rejects.toEqual({ status: 500 })
+
+    expect(calls.reviews).toHaveLength(0)
+    expect(hasReviewed(payload.repo, payload.prNumber, payload.headSha!)).toBe(false)
   })
 
   test("does not review the same head sha twice", async () => {
@@ -246,7 +335,7 @@ describe("processReviewJob", () => {
 
     expect(calls.reviews).toHaveLength(2)
     expect(calls.reviews[1]?.comments).toHaveLength(0)
-    expect(calls.reviews[1]?.body).toContain("comentarios inline")
+    expect(calls.reviews[1]?.body).toContain("Some inline comments could not be anchored")
   })
 
   test("forces a new review for the same sha on manual commands", async () => {
@@ -365,8 +454,8 @@ describe("processReviewJob", () => {
     expect(aiCalls).toBe(0)
     expect(calls.reviews).toHaveLength(0)
     expect(calls.comments).toHaveLength(1)
-    expect(calls.comments[0]).toContain("límite global diario de reviews del bot")
-    expect(calls.comments[0]).not.toContain("este PR")
+    expect(calls.comments[0]).toContain("global daily review limit")
+    expect(calls.comments[0]).not.toContain("this pull request")
   })
 
   test("allows reviews when a limit is disabled with 0", async () => {

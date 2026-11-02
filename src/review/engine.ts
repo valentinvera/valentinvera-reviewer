@@ -111,9 +111,7 @@ function normalizeResult(object: ReviewResult): ReviewResult {
   ).slice(0, config.reviewMaxFindings)
 
   return {
-    summary:
-      object.summary.trim() ||
-      (config.reviewLanguage === "es" ? "Sin observaciones." : "No significant findings."),
+    summary: object.summary.trim() || "No significant findings.",
     verdict: object.verdict,
     findings,
   }
@@ -129,10 +127,7 @@ function mergeResults(results: ReviewResult[]): ReviewResult {
   let summary = summaries.join("\n\n")
   if (summary.length > 2_500) summary = `${summary.slice(0, 2_500).trimEnd()}…`
 
-  const prefix =
-    config.reviewLanguage === "es"
-      ? `Revisión dividida en ${results.length} partes por el tamaño del diff.`
-      : `Review split into ${results.length} parts because of diff size.`
+  const prefix = `Review split into ${results.length} parts because of diff size.`
 
   return {
     summary: [prefix, summary].join("\n\n").trim(),
@@ -151,7 +146,6 @@ async function callModel(input: ModelCallInput): Promise<{
     diff: input.diff,
     truncated: input.truncated,
     maxFindings: config.reviewMaxFindings,
-    language: config.reviewLanguage,
     scope: input.scope,
   })
 

@@ -1,5 +1,8 @@
 import { config } from "../config"
-import type { Finding, ReviewResult } from "./schema"
+import type { Finding } from "./schema"
+
+const TRUNCATED_NOTICE =
+  "> ⚠️ The diff exceeded the configured size limit, so only part of it was reviewed."
 
 const SEVERITY_LABEL: Record<Finding["severity"], string> = {
   critical: "🔴 critical",
@@ -12,41 +15,51 @@ export function buildInlineComment(finding: Finding): string {
   return `**${SEVERITY_LABEL[finding.severity]} · ${finding.title}**\n\n${finding.body}`
 }
 
+export function shortSha(sha: string): string {
+  return sha.slice(0, 10)
+}
+
+function pluralize(count: number, singular: string): string {
+  return `${count} ${singular}${count === 1 ? "" : "s"}`
+}
+
+/**
+ * Short top-level review body. The details live in the inline comments, so
+ * there is no prose summary here.
+ */
 export function buildReviewBody(input: {
-  result: ReviewResult
+  findingsCount: number
   headSha: string
   model: string
   unanchored: Finding[]
   truncated: boolean
 }): string {
   const sections: string[] = [
-    "## 🤖 Review automático",
-    input.result.summary || "Sin observaciones.",
+    "### 💡 Code Review",
+    "Here are some automated review suggestions for this pull request.",
+    `**Reviewed commit:** \`${shortSha(input.headSha)}\``,
   ]
 
   if (input.unanchored.length > 0) {
-    sections.push("### Observaciones generales")
     sections.push(
-      input.unanchored
-        .map(
+      [
+        "**General findings** (not tied to a diff line):",
+        "",
+        ...input.unanchored.map(
           (finding) =>
             `- **${SEVERITY_LABEL[finding.severity]} · ${finding.title}** — ${finding.body}`,
-        )
-        .join("\n"),
+        ),
+      ].join("\n"),
     )
   }
 
-  if (input.result.findings.length === 0) {
-    sections.push("_No encontré problemas relevantes en este diff._")
-  }
-
   if (input.truncated) {
-    sections.push("> ⚠️ El diff superaba el límite configurado y se revisó parcialmente.")
+    sections.push(
+      "> ⚠️ The diff exceeded the configured size limit, so only part of it was reviewed.",
+    )
   }
 
-  sections.push(
-    `<sub>Revisado \`${input.headSha.slice(0, 10)}\` · ${input.model} · ${input.result.findings.length} hallazgo(s)</sub>`,
-  )
+  sections.push(`<sub>${input.model} · ${pluralize(input.findingsCount, "finding")}</sub>`)
 
   return sections.join("\n\n")
 }
@@ -58,47 +71,54 @@ export type RateLimitReason =
   | "global_24h"
 
 export function buildRateLimitNotice(reason: RateLimitReason): string {
-  const english = config.reviewLanguage === "en"
   const cooldownMinutes = Math.max(1, Math.ceil(config.reviewManualCooldownSeconds / 60))
 
   switch (reason) {
     case "auto_per_pr_24h":
-      return english
-        ? "⏳ Automatic review limit reached for this pull request. Reviews will resume once the 24-hour window allows."
-        : "⏳ Se alcanzó el límite de reviews automáticos de este PR. Se reanudarán cuando lo permita la ventana de 24 horas."
+      return "⏳ Automatic review limit reached for this pull request. Reviews will resume once the 24-hour window allows."
     case "manual_per_pr_24h":
-      return english
-        ? "⏳ Manual review limit reached for this pull request. Please try again later."
-        : "⏳ Se alcanzó el límite de reviews manuales de este PR. Intentá de nuevo más tarde."
+      return "⏳ Manual review limit reached for this pull request. Please try again later."
     case "manual_cooldown":
-      return english
-        ? `⏳ A manual review ran recently. Please wait about ${cooldownMinutes} minute(s) before requesting /review again.`
-        : `⏳ Se ejecutó un review manual hace poco. Esperá unos ${cooldownMinutes} minuto(s) antes de volver a pedir /review.`
+      return `⏳ A manual review ran recently. Please wait about ${cooldownMinutes} minute(s) before requesting /review again.`
     case "global_24h":
-      return english
-        ? "⏳ The bot's global daily review limit (across all repositories) was reached. Reviews will resume once the 24-hour window allows."
-        : "⏳ Se alcanzó el límite global diario de reviews del bot (en todos los repositorios). Los reviews se reanudarán cuando lo permita la ventana de 24 horas."
+      return "⏳ The bot's global daily review limit (across all repositories) was reached. Reviews will resume once the 24-hour window allows."
   }
 }
 
+/**
+ * Status comment that is created once per PR and updated on every review.
+ * When the review found nothing, this comment is the only output.
+ */
 export function buildSummaryComment(input: {
-  result: ReviewResult
+  findingsCount: number
   headSha: string
   model: string
-  reviewUrl: string
+  /** Link to the published review; null when no review was posted. */
+  reviewUrl: string | null
   trigger: string
+  truncated: boolean
 }): string {
-  const status = input.result.findings.length === 0 ? "✅ Sin hallazgos" : "📝 Revisado"
+  const clean = input.findingsCount === 0
+  const review = input.reviewUrl ? `[📝 Code Review](${input.reviewUrl})` : "📝 Code Review"
+  const status = clean
+    ? "✅ Completed, no issues found"
+    : `💡 Completed, ${pluralize(input.findingsCount, "finding")}`
+
   const lines = [
-    "### 🤖 valentinvera-reviewer",
+    "## Code Review Summary",
     "",
-    "| Estado | Commit | Hallazgos | Disparador |",
+    "This comment shows the latest review activity on this pull request.",
+    "",
+    "| Review | Status | Commit | Review trigger |",
     "| --- | --- | --- | --- |",
-    `| ${status} | \`${input.headSha.slice(0, 10)}\` | ${input.result.findings.length} | ${input.trigger} |`,
+    `| ${review} | ${status} | \`${shortSha(input.headSha)}\` | ${input.trigger} |`,
     "",
-    `[Ver review completa](${input.reviewUrl})`,
+    clean
+      ? "No issues found. Nice work! 🎉"
+      : "See the inline comments in the review for the suggested changes.",
     "",
-    `<sub>${input.model} · este comentario se actualiza en cada push</sub>`,
+    ...(input.truncated ? [TRUNCATED_NOTICE, ""] : []),
+    `<sub>${input.model} · this comment is updated on every review · comment \`/review\` to run it again</sub>`,
   ]
 
   return lines.join("\n")

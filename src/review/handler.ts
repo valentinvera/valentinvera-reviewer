@@ -43,11 +43,11 @@ export interface ReviewJobDeps {
 }
 
 const ACTION_LABEL: Record<string, string> = {
-  opened: "PR abierto",
-  synchronize: "nuevo push",
-  reopened: "PR reabierto",
-  ready_for_review: "listo para review",
-  manual: "manual",
+  opened: "PR opened",
+  synchronize: "New commits pushed",
+  reopened: "PR reopened",
+  ready_for_review: "Ready for review",
+  manual: "/review command",
 }
 
 const RATE_LIMIT_WINDOW_MS = 24 * 60 * 60 * 1000
@@ -241,6 +241,45 @@ export async function processReviewJob(
   })
 
   const generated = await generate({ repo: payload.repo, pr, diff })
+  const trigger = ACTION_LABEL[payload.action] ?? payload.action
+  const findingsCount = generated.result.findings.length
+
+  if (findingsCount === 0) {
+    // Nothing to suggest: skip the empty review and only report the status.
+    // A failure here propagates so the job retries, since this comment is
+    // the only visible output of the review.
+    await upsertSummaryComment(
+      client,
+      payload.repo,
+      payload.prNumber,
+      buildSummaryComment({
+        findingsCount,
+        headSha,
+        model: generated.model,
+        reviewUrl: null,
+        trigger,
+        truncated: generated.clipped.truncated,
+      }),
+    )
+
+    markReviewed({
+      repo: payload.repo,
+      prNumber: payload.prNumber,
+      headSha,
+      reviewId: null,
+    })
+
+    log.info("review.published", {
+      repo: payload.repo,
+      pr: payload.prNumber,
+      sha: headSha.slice(0, 10),
+      findings: 0,
+      reviewId: null,
+      durationMs: generated.durationMs,
+    })
+    return
+  }
+
   const { anchored, unanchored } = partitionFindings(generated.result.findings, diff)
 
   const comments = anchored.map((finding) => ({
@@ -251,7 +290,7 @@ export async function processReviewJob(
   }))
 
   const reviewBody = buildReviewBody({
-    result: generated.result,
+    findingsCount,
     headSha,
     model: generated.model,
     unanchored,
@@ -276,7 +315,7 @@ export async function processReviewJob(
 
       review = await client.createReview(payload.repo, payload.prNumber, {
         commitId: headSha,
-        body: `${reviewBody}\n\n> ⚠️ Algunos comentarios inline no pudieron anclarse y se omitieron.`,
+        body: `${reviewBody}\n\n> ⚠️ Some inline comments could not be anchored to the diff and were omitted.`,
         comments: [],
       })
     } else {
@@ -297,11 +336,12 @@ export async function processReviewJob(
       payload.repo,
       payload.prNumber,
       buildSummaryComment({
-        result: generated.result,
+        findingsCount,
         headSha,
         model: generated.model,
         reviewUrl: review.html_url,
-        trigger: ACTION_LABEL[payload.action] ?? payload.action,
+        trigger,
+        truncated: generated.clipped.truncated,
       }),
     )
   } catch (error) {
@@ -318,7 +358,7 @@ export async function processReviewJob(
     repo: payload.repo,
     pr: payload.prNumber,
     sha: headSha.slice(0, 10),
-    findings: generated.result.findings.length,
+    findings: findingsCount,
     inline: comments.length,
     unanchored: unanchored.length,
     reviewId: review.id,

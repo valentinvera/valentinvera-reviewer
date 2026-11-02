@@ -30,7 +30,7 @@ index 1111111..2222222 100644
 `
 
 const modelResult = {
-  summary: "  Hay un cambio riesgoso.  ",
+  summary: "  There is a risky change.  ",
   verdict: "needs_changes" as const,
   findings: [
     {
@@ -91,7 +91,7 @@ function chunkResult(index: number) {
       {
         type: "text" as const,
         text: JSON.stringify({
-          summary: `Parte ${index + 1}`,
+          summary: `Part ${index + 1}`,
           verdict: "needs_changes",
           findings: [
             {
@@ -120,7 +120,7 @@ describe("generateReview", () => {
     const model = mockModel()
     const generated = await generateReview({ repo: "valentinvera/plata", pr, diff, model })
 
-    expect(generated.result.summary).toBe("Hay un cambio riesgoso.")
+    expect(generated.result.summary).toBe("There is a risky change.")
     expect(generated.result.findings).toHaveLength(2)
     expect(generated.result.findings[0]).toMatchObject({
       path: "src/a.ts",
@@ -150,7 +150,7 @@ describe("generateReview", () => {
 
     expect(model.doGenerateCalls).toHaveLength(chunks.length)
     expect(generated.result.findings).toHaveLength(chunks.length)
-    expect(generated.result.summary).toContain("Revisión dividida en")
+    expect(generated.result.summary).toContain("Review split into")
     expect(generated.usage?.totalTokens).toBe(30 * chunks.length)
   })
 })

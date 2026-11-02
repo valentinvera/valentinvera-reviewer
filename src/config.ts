@@ -3,7 +3,6 @@ import { resolve } from "node:path"
 
 export type LogLevel = "debug" | "info" | "warn" | "error"
 export type ReasoningMode = "off" | "low" | "high" | "max"
-export type ReviewLanguage = "es" | "en"
 
 export interface Config {
   /** HTTP server */
@@ -38,7 +37,6 @@ export interface Config {
   workerEnabled: boolean
 
   /** Review */
-  reviewLanguage: ReviewLanguage
   reviewMaxDiffChars: number
   reviewMaxFindings: number
   reviewChunkChars: number
@@ -135,7 +133,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     workerConcurrency: Math.max(1, int(env.WORKER_CONCURRENCY, 1)),
     workerEnabled: bool(env.WORKER_ENABLED, true),
 
-    reviewLanguage: oneOf(env.REVIEW_LANGUAGE, ["es", "en"] as const, "es"),
     reviewMaxDiffChars: int(env.REVIEW_MAX_DIFF_CHARS, 240_000),
     reviewMaxFindings: int(env.REVIEW_MAX_FINDINGS, 12),
     reviewChunkChars: int(env.REVIEW_CHUNK_CHARS, 16_000),
