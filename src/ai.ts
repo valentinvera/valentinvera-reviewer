@@ -35,8 +35,9 @@ export function applyReasoningPolicy(body: string, mode: ReasoningMode): string 
  *
  * A non-streaming review call sends no bytes until the model is done, which
  * can take longer than Bun's 5-minute default socket idle timeout. That timer
- * is disabled here so `AI_TIMEOUT_MS` (an AbortSignal deadline set by the
- * review engine) is the only limit on a model call.
+ * is disabled when the request carries an AbortSignal, so `AI_TIMEOUT_MS`
+ * (the deadline set by the review engine) is the only limit on a model call.
+ * Requests without a signal keep Bun's default.
  */
 export const rewriteProviderRequest = async (
   input: Parameters<typeof fetch>[0],
@@ -52,7 +53,10 @@ export const rewriteProviderRequest = async (
     body = applyReasoningPolicy(body, config.aiReasoningMode)
   }
 
-  return fetch(input, { ...init, headers, body, timeout: false })
+  // Only drop Bun's idle timeout when the caller set its own deadline.
+  const timeout = init?.signal ? false : undefined
+
+  return fetch(input, { ...init, headers, body, timeout })
 }
 
 // Bun's `fetch` type has a static `preconnect`; the AI SDK only needs the call

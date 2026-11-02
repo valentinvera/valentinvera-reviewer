@@ -62,4 +62,19 @@ describe("rewriteProviderRequest", () => {
     expect(captured?.signal).toBe(signal)
     expect(new Headers(captured?.headers).get("user-agent")).toBe("valentinvera-reviewer/0.1.0")
   })
+
+  test("keeps Bun's default idle timeout when the request has no abort signal", async () => {
+    let captured: BunFetchRequestInit | undefined
+    globalThis.fetch = (async (_input: unknown, init?: BunFetchRequestInit) => {
+      captured = init
+      return new Response("{}")
+    }) as typeof fetch
+
+    await rewriteProviderRequest("https://example.test/chat/completions", {
+      method: "POST",
+      body: BODY,
+    })
+
+    expect(captured?.timeout).toBeUndefined()
+  })
 })
