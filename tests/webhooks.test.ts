@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { config } from "../src/config"
 import { db } from "../src/db"
 import { getWebhooks } from "../src/github"
@@ -13,6 +13,7 @@ const basePayload = {
     number: 51,
     draft: false,
     head: { sha: "abc123def456" },
+    user: { login: "valentinvera" },
   },
   sender: { login: "valentinvera" },
 }
@@ -45,8 +46,37 @@ async function webhookRequest(input: {
   })
 }
 
+const defaultSkipAuthors = [...config.reviewSkipAuthors]
+
+function payloadByAuthor(login: string, overrides: Record<string, unknown> = {}): string {
+  return payloadWith({
+    pull_request: { ...basePayload.pull_request, user: { login } },
+    sender: { login },
+    ...overrides,
+  })
+}
+
+function reviewCommandOnPr(delivery: string): Promise<Request> {
+  const body = JSON.stringify({
+    action: "created",
+    installation: { id: 99 },
+    repository: { full_name: "valentinvera/plata" },
+    issue: { number: 51, pull_request: { url: "https://api.github.com/pulls/51" } },
+    comment: {
+      body: "/review",
+      user: { login: "valentinvera" },
+      author_association: "OWNER",
+    },
+  })
+  return webhookRequest({ body, event: "issue_comment", delivery })
+}
+
 beforeEach(() => {
   db.exec("DELETE FROM jobs")
+})
+
+afterEach(() => {
+  config.reviewSkipAuthors = [...defaultSkipAuthors]
 })
 
 describe("POST /webhooks/github", () => {
@@ -278,5 +308,97 @@ describe("POST /webhooks/github", () => {
 
     expect(response.status).toBe(202)
     expect(queueStats().queued).toBe(0)
+  })
+
+  describe("REVIEW_SKIP_AUTHORS", () => {
+    test("skips auto reviews for maintenance bots in the default list", async () => {
+      for (const [index, login] of ["dependabot[bot]", "renovate[bot]", "snyk-bot"].entries()) {
+        const response = await handleGitHubWebhook(
+          await webhookRequest({ body: payloadByAuthor(login), delivery: `skip-${index}` }),
+        )
+
+        expect(response.status).toBe(202)
+      }
+
+      expect(queueStats().queued).toBe(0)
+    })
+
+    test("matches the PR author case-insensitively", async () => {
+      const response = await handleGitHubWebhook(
+        await webhookRequest({ body: payloadByAuthor("Dependabot[bot]") }),
+      )
+
+      expect(response.status).toBe(202)
+      expect(queueStats().queued).toBe(0)
+    })
+
+    test("skips every handled action, not only opened", async () => {
+      for (const action of ["synchronize", "reopened", "ready_for_review"]) {
+        const body = payloadByAuthor("renovate[bot]", { action })
+        await handleGitHubWebhook(await webhookRequest({ body, delivery: `skip-${action}` }))
+      }
+
+      expect(queueStats().queued).toBe(0)
+    })
+
+    test("still reviews code-writing agents and unknown bots", async () => {
+      const logins = ["cursor[bot]", "copilot-swe-agent[bot]", "devin", "some-unknown[bot]"]
+      for (const [index, login] of logins.entries()) {
+        const response = await handleGitHubWebhook(
+          await webhookRequest({ body: payloadByAuthor(login), delivery: `agent-${index}` }),
+        )
+
+        expect(response.status).toBe(202)
+      }
+
+      expect(queueStats().queued).toBe(logins.length)
+    })
+
+    test("uses the PR author, not the event sender", async () => {
+      const body = payloadByAuthor("valentinvera", { sender: { login: "dependabot[bot]" } })
+      await handleGitHubWebhook(await webhookRequest({ body }))
+
+      expect(queueStats().queued).toBe(1)
+    })
+
+    test("skips nobody when the list is empty", async () => {
+      config.reviewSkipAuthors = []
+
+      await handleGitHubWebhook(await webhookRequest({ body: payloadByAuthor("dependabot[bot]") }))
+
+      expect(queueStats().queued).toBe(1)
+    })
+
+    test("honors a custom list", async () => {
+      config.reviewSkipAuthors = ["my-bot"]
+
+      await handleGitHubWebhook(
+        await webhookRequest({ body: payloadByAuthor("my-bot"), delivery: "custom-1" }),
+      )
+      await handleGitHubWebhook(
+        await webhookRequest({ body: payloadByAuthor("dependabot[bot]"), delivery: "custom-2" }),
+      )
+
+      expect(queueStats().queued).toBe(1)
+    })
+
+    test("still enqueues a manual /review on a skipped author's PR", async () => {
+      await handleGitHubWebhook(
+        await webhookRequest({ body: payloadByAuthor("dependabot[bot]"), delivery: "auto-1" }),
+      )
+      expect(queueStats().queued).toBe(0)
+
+      const response = await handleGitHubWebhook(await reviewCommandOnPr("manual-1"))
+
+      expect(response.status).toBe(202)
+      expect(queueStats().queued).toBe(1)
+
+      const row = db.query<{ payload: string }, []>("SELECT payload FROM jobs LIMIT 1").get()
+      expect(JSON.parse(row!.payload)).toMatchObject({
+        prNumber: 51,
+        action: "manual",
+        force: true,
+      })
+    })
   })
 })
