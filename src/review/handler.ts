@@ -43,11 +43,11 @@ export interface ReviewJobDeps {
 }
 
 const ACTION_LABEL: Record<string, string> = {
-  opened: "PR abierto",
-  synchronize: "nuevo push",
-  reopened: "PR reabierto",
-  ready_for_review: "listo para review",
-  manual: "manual",
+  opened: "PR opened",
+  synchronize: "New commits pushed",
+  reopened: "PR reopened",
+  ready_for_review: "Ready for review",
+  manual: "/review command",
 }
 
 const RATE_LIMIT_WINDOW_MS = 24 * 60 * 60 * 1000
@@ -276,7 +276,7 @@ export async function processReviewJob(
 
       review = await client.createReview(payload.repo, payload.prNumber, {
         commitId: headSha,
-        body: `${reviewBody}\n\n> ⚠️ Algunos comentarios inline no pudieron anclarse y se omitieron.`,
+        body: `${reviewBody}\n\n> ⚠️ Some inline comments could not be anchored to the diff and were omitted.`,
         comments: [],
       })
     } else {

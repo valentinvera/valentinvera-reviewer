@@ -246,7 +246,7 @@ describe("processReviewJob", () => {
 
     expect(calls.reviews).toHaveLength(2)
     expect(calls.reviews[1]?.comments).toHaveLength(0)
-    expect(calls.reviews[1]?.body).toContain("comentarios inline")
+    expect(calls.reviews[1]?.body).toContain("Some inline comments could not be anchored")
   })
 
   test("forces a new review for the same sha on manual commands", async () => {
@@ -365,8 +365,8 @@ describe("processReviewJob", () => {
     expect(aiCalls).toBe(0)
     expect(calls.reviews).toHaveLength(0)
     expect(calls.comments).toHaveLength(1)
-    expect(calls.comments[0]).toContain("límite global diario de reviews del bot")
-    expect(calls.comments[0]).not.toContain("este PR")
+    expect(calls.comments[0]).toContain("global daily review limit")
+    expect(calls.comments[0]).not.toContain("this pull request")
   })
 
   test("allows reviews when a limit is disabled with 0", async () => {
