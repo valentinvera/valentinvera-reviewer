@@ -32,8 +32,13 @@ export function applyReasoningPolicy(body: string, mode: ReasoningMode): string 
  * OpenCode Go needs a stable session header. DeepSeek V4.1 Flash is also a
  * reasoning model: with a full diff it can spend the whole output budget
  * thinking and return no text, so the policy is injected here.
+ *
+ * A non-streaming review call sends no bytes until the model is done, which
+ * can take longer than Bun's 5-minute default socket idle timeout. That timer
+ * is disabled here so `AI_TIMEOUT_MS` (an AbortSignal deadline set by the
+ * review engine) is the only limit on a model call.
  */
-const rewriteProviderRequest = async (
+export const rewriteProviderRequest = async (
   input: Parameters<typeof fetch>[0],
   init?: Parameters<typeof fetch>[1],
 ): Promise<Response> => {
@@ -47,7 +52,7 @@ const rewriteProviderRequest = async (
     body = applyReasoningPolicy(body, config.aiReasoningMode)
   }
 
-  return fetch(input, { ...init, headers, body })
+  return fetch(input, { ...init, headers, body, timeout: false })
 }
 
 // Bun's `fetch` type has a static `preconnect`; the AI SDK only needs the call

@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test"
-import { applyReasoningPolicy } from "../src/ai"
+import { afterEach, describe, expect, test } from "bun:test"
+import { applyReasoningPolicy, rewriteProviderRequest } from "../src/ai"
 
 const BODY = JSON.stringify({
   model: "deepseek-v4.1-flash",
@@ -34,5 +34,32 @@ describe("applyReasoningPolicy", () => {
   test("returns non-JSON bodies untouched", () => {
     expect(applyReasoningPolicy("not-json", "off")).toBe("not-json")
     expect(applyReasoningPolicy("", "off")).toBe("")
+  })
+})
+
+describe("rewriteProviderRequest", () => {
+  const originalFetch = globalThis.fetch
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch
+  })
+
+  test("disables Bun's socket idle timeout and keeps the caller's abort signal", async () => {
+    let captured: BunFetchRequestInit | undefined
+    globalThis.fetch = (async (_input: unknown, init?: BunFetchRequestInit) => {
+      captured = init
+      return new Response("{}")
+    }) as typeof fetch
+
+    const signal = AbortSignal.timeout(60_000)
+    await rewriteProviderRequest("https://example.test/chat/completions", {
+      method: "POST",
+      body: BODY,
+      signal,
+    })
+
+    expect(captured?.timeout).toBe(false)
+    expect(captured?.signal).toBe(signal)
+    expect(new Headers(captured?.headers).get("user-agent")).toBe("valentinvera-reviewer/0.1.0")
   })
 })
