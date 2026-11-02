@@ -45,7 +45,7 @@ const diff = `diff --git a/src/a.ts b/src/a.ts
 
 const generated: GeneratedReview = {
   result: {
-    summary: "Resumen",
+    summary: "Summary text",
     verdict: "needs_changes",
     findings: [
       {
@@ -53,7 +53,7 @@ const generated: GeneratedReview = {
         line: 1,
         side: "RIGHT",
         severity: "high",
-        title: "Uno",
+        title: "One",
         body: "Body",
       },
       {
@@ -61,7 +61,7 @@ const generated: GeneratedReview = {
         line: 99,
         side: "RIGHT",
         severity: "low",
-        title: "Dos",
+        title: "Two",
         body: "Body2",
       },
     ],
@@ -159,9 +159,11 @@ describe("processReviewJob", () => {
     expect(calls.reviews).toHaveLength(1)
     expect(calls.reviews[0]?.comments).toHaveLength(1)
     expect(calls.reviews[0]?.comments[0]?.path).toBe("src/a.ts")
-    expect(calls.reviews[0]?.body).toContain("Observaciones generales")
-    expect(calls.reviews[0]?.body).toContain("Dos")
-    expect(calls.reviews[0]?.body).toContain("Review automático")
+    expect(calls.reviews[0]?.body).toContain("General findings")
+    expect(calls.reviews[0]?.body).toContain("Two")
+    expect(calls.reviews[0]?.body).toContain("### 💡 Code Review")
+    expect(calls.reviews[0]?.body).toContain("**Reviewed commit:** `abc123def4`")
+    expect(calls.reviews[0]?.body).not.toContain("Summary text")
     expect(calls.comments).toHaveLength(1)
     expect(calls.comments[0]).toContain("valentinvera-reviewer")
     expect(hasReviewed(payload.repo, payload.prNumber, payload.headSha!)).toBe(true)

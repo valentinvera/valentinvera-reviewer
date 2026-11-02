@@ -12,41 +12,51 @@ export function buildInlineComment(finding: Finding): string {
   return `**${SEVERITY_LABEL[finding.severity]} · ${finding.title}**\n\n${finding.body}`
 }
 
+export function shortSha(sha: string): string {
+  return sha.slice(0, 10)
+}
+
+function pluralize(count: number, singular: string): string {
+  return `${count} ${singular}${count === 1 ? "" : "s"}`
+}
+
+/**
+ * Short top-level review body. The details live in the inline comments, so
+ * there is no prose summary here.
+ */
 export function buildReviewBody(input: {
-  result: ReviewResult
+  findingsCount: number
   headSha: string
   model: string
   unanchored: Finding[]
   truncated: boolean
 }): string {
   const sections: string[] = [
-    "## 🤖 Review automático",
-    input.result.summary || "Sin observaciones.",
+    "### 💡 Code Review",
+    "Here are some automated review suggestions for this pull request.",
+    `**Reviewed commit:** \`${shortSha(input.headSha)}\``,
   ]
 
   if (input.unanchored.length > 0) {
-    sections.push("### Observaciones generales")
     sections.push(
-      input.unanchored
-        .map(
+      [
+        "**General findings** (not tied to a diff line):",
+        "",
+        ...input.unanchored.map(
           (finding) =>
             `- **${SEVERITY_LABEL[finding.severity]} · ${finding.title}** — ${finding.body}`,
-        )
-        .join("\n"),
+        ),
+      ].join("\n"),
     )
   }
 
-  if (input.result.findings.length === 0) {
-    sections.push("_No encontré problemas relevantes en este diff._")
-  }
-
   if (input.truncated) {
-    sections.push("> ⚠️ El diff superaba el límite configurado y se revisó parcialmente.")
+    sections.push(
+      "> ⚠️ The diff exceeded the configured size limit, so only part of it was reviewed.",
+    )
   }
 
-  sections.push(
-    `<sub>Revisado \`${input.headSha.slice(0, 10)}\` · ${input.model} · ${input.result.findings.length} hallazgo(s)</sub>`,
-  )
+  sections.push(`<sub>${input.model} · ${pluralize(input.findingsCount, "finding")}</sub>`)
 
   return sections.join("\n\n")
 }

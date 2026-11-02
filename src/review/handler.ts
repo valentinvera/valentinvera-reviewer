@@ -251,7 +251,7 @@ export async function processReviewJob(
   }))
 
   const reviewBody = buildReviewBody({
-    result: generated.result,
+    findingsCount: generated.result.findings.length,
     headSha,
     model: generated.model,
     unanchored,
