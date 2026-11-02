@@ -162,7 +162,7 @@ async function callModel(input: ModelCallInput): Promise<{
       temperature: 0.1,
       maxOutputTokens: config.aiMaxOutputTokens,
       maxRetries: 2,
-      abortSignal: AbortSignal.timeout(240_000),
+      abortSignal: AbortSignal.timeout(config.aiTimeoutMs),
     })
 
     let output: ReviewResult
