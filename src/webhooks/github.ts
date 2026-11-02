@@ -16,6 +16,7 @@ interface PullRequestEventPayload {
     number: number
     draft: boolean
     head: { sha: string }
+    user?: { login: string }
   }
   sender?: { login: string }
 }
@@ -50,6 +51,18 @@ function registerHandlers(): void {
 
     if (!HANDLED_ACTIONS.has(event.action)) return
     if (event.pull_request.draft) return
+
+    const author = event.pull_request.user?.login
+    if (author && config.reviewSkipAuthors.includes(author.toLowerCase())) {
+      log.info("webhook.skipped_author", {
+        delivery: id,
+        repo: event.repository.full_name,
+        pr: event.pull_request.number,
+        author,
+        reason: "PR author is in REVIEW_SKIP_AUTHORS",
+      })
+      return
+    }
 
     const installationId = event.installation?.id
     if (!installationId) {
@@ -141,8 +154,10 @@ function registerHandlers(): void {
  * - Verifies `X-Hub-Signature-256` against the raw body.
  * - `ping` is acknowledged with 200.
  * - `pull_request` (opened/synchronize/reopened/ready_for_review, non-draft)
- *   is enqueued as `review_pull_request` and acknowledged with 202.
- * - `/review` comments on a PR enqueue a forced manual review.
+ *   is enqueued as `review_pull_request` and acknowledged with 202, unless the
+ *   PR author is listed in `REVIEW_SKIP_AUTHORS` (maintenance bots by default).
+ * - `/review` comments on a PR enqueue a forced manual review, regardless of
+ *   the PR author.
  *
  * The actual review is intentionally not implemented here: the worker owns it.
  */
