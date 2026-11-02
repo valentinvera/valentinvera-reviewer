@@ -29,6 +29,8 @@ export interface Config {
   aiReasoningMode: ReasoningMode
   /** Output budget per model call. Reasoning tokens count against it. */
   aiMaxOutputTokens: number
+  /** Wall-clock deadline for one model call, retries included. */
+  aiTimeoutMs: number
   /** OpenCode Go requires a stable session id for routing. */
   aiSessionId: string
 
@@ -58,6 +60,14 @@ export interface Config {
 export const DEFAULT_AI_MAX_OUTPUT_TOKENS = 32_000
 /** Documented max output of DeepSeek V4.1 Flash; larger values get a 400. */
 export const AI_MAX_OUTPUT_TOKENS_CAP = 384_000
+
+/**
+ * The model streams ~200 output tokens/s, so a chunk that spends a full 64k
+ * budget needs ~320s (a ~33k chunk took ~233s). 10 minutes leaves ~2x headroom.
+ */
+export const DEFAULT_AI_TIMEOUT_MS = 600_000
+/** Upper bound so a typo cannot overflow the timer or stall the worker for hours. */
+export const AI_TIMEOUT_MS_CAP = 1_800_000
 
 export const DEFAULT_REVIEW_SKIP_AUTHORS = [
   "dependabot[bot]",
@@ -145,6 +155,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       positiveInt(env.AI_MAX_OUTPUT_TOKENS, DEFAULT_AI_MAX_OUTPUT_TOKENS),
       AI_MAX_OUTPUT_TOKENS_CAP,
     ),
+    aiTimeoutMs: Math.min(positiveInt(env.AI_TIMEOUT_MS, DEFAULT_AI_TIMEOUT_MS), AI_TIMEOUT_MS_CAP),
     aiSessionId: str(env.AI_SESSION_ID) ?? "valentinvera-reviewer",
 
     queuePollMs: int(env.QUEUE_POLL_MS, 1_000),

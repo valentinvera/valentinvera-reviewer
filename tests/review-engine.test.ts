@@ -151,6 +151,32 @@ describe("generateReview", () => {
     }
   })
 
+  test("aborts a model call that exceeds the configured timeout", async () => {
+    const original = config.aiTimeoutMs
+    config.aiTimeoutMs = 50
+    let signal: AbortSignal | undefined
+
+    const model = new MockLanguageModelV4({
+      doGenerate: async (options) => {
+        signal = options.abortSignal
+        await new Promise((_, reject) => {
+          options.abortSignal?.addEventListener("abort", () => reject(options.abortSignal?.reason))
+        })
+        throw new Error("unreachable")
+      },
+    })
+
+    try {
+      await expect(generateReview({ repo: "valentinvera/plata", pr, diff, model })).rejects.toThrow(
+        "AI review failed",
+      )
+      expect(signal?.aborted).toBe(true)
+      expect(model.doGenerateCalls).toHaveLength(1)
+    } finally {
+      config.aiTimeoutMs = original
+    }
+  })
+
   test("uses the configured output budget for every diff chunk", async () => {
     const diff = bigDiff()
     const chunks = chunkDiffBySize(diff, config.reviewChunkChars)
