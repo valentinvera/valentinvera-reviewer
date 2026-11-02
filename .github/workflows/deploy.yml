@@ -53,7 +53,7 @@ jobs:
           cache-to: type=gha,mode=max
           labels: |
             org.opencontainers.image.title=valentinvera-reviewer
-            org.opencontainers.image.description=GitHub App para revisar pull requests
+            org.opencontainers.image.description=GitHub App that reviews pull requests
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ github.sha }}
