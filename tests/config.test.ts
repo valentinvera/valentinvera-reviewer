@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { DEFAULT_REVIEW_SKIP_AUTHORS, loadConfig } from "../src/config"
+import {
+  AI_MAX_OUTPUT_TOKENS_CAP,
+  DEFAULT_AI_MAX_OUTPUT_TOKENS,
+  DEFAULT_REVIEW_SKIP_AUTHORS,
+  loadConfig,
+} from "../src/config"
 
 describe("loadConfig", () => {
   test("uses defaults for an empty environment", () => {
@@ -10,6 +15,8 @@ describe("loadConfig", () => {
     expect(config.databasePath).toBe("./data/reviewer.db")
     expect(config.aiModel).toBe("deepseek-v4.1-flash")
     expect(config.aiReasoningMode).toBe("off")
+    expect(config.aiMaxOutputTokens).toBe(32_000)
+    expect(DEFAULT_AI_MAX_OUTPUT_TOKENS).toBe(32_000)
     expect(config.workerConcurrency).toBe(1)
     expect(config.jobMaxAttempts).toBe(3)
     expect(config.queuePollMs).toBe(1000)
@@ -40,6 +47,7 @@ describe("loadConfig", () => {
       REVIEW_GLOBAL_MAX_24H: "25",
       JOB_MAX_ATTEMPTS: "5",
       AI_REASONING_MODE: "low",
+      AI_MAX_OUTPUT_TOKENS: "64000",
       LOG_LEVEL: "debug",
       MAX_REQUEST_BODY_BYTES: "2048",
     })
@@ -57,6 +65,7 @@ describe("loadConfig", () => {
     expect(config.reviewGlobalMax24h).toBe(25)
     expect(config.jobMaxAttempts).toBe(5)
     expect(config.aiReasoningMode).toBe("low")
+    expect(config.aiMaxOutputTokens).toBe(64_000)
     expect(config.logLevel).toBe("debug")
     expect(config.maxRequestBodyBytes).toBe(2_048)
   })
@@ -75,6 +84,21 @@ describe("loadConfig", () => {
     expect(config.aiReasoningMode).toBe("off")
     expect(config.logLevel).toBe("info")
     expect(config.maxRequestBodyBytes).toBe(10 * 1024 * 1024)
+  })
+
+  test("falls back to the default output budget for non-positive AI_MAX_OUTPUT_TOKENS", () => {
+    for (const value of ["0", "-1", "abc", ""]) {
+      expect(loadConfig({ AI_MAX_OUTPUT_TOKENS: value }).aiMaxOutputTokens).toBe(
+        DEFAULT_AI_MAX_OUTPUT_TOKENS,
+      )
+    }
+  })
+
+  test("caps AI_MAX_OUTPUT_TOKENS at the model's documented output limit", () => {
+    expect(loadConfig({ AI_MAX_OUTPUT_TOKENS: "384000" }).aiMaxOutputTokens).toBe(384_000)
+    expect(loadConfig({ AI_MAX_OUTPUT_TOKENS: "1000000000" }).aiMaxOutputTokens).toBe(
+      AI_MAX_OUTPUT_TOKENS_CAP,
+    )
   })
 
   test("parses REVIEW_SKIP_AUTHORS as a trimmed, lowercased, deduplicated list", () => {

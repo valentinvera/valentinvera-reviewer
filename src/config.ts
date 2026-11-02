@@ -27,6 +27,8 @@ export interface Config {
   aiBaseUrl: string
   aiModel: string
   aiReasoningMode: ReasoningMode
+  /** Output budget per model call. Reasoning tokens count against it. */
+  aiMaxOutputTokens: number
   /** OpenCode Go requires a stable session id for routing. */
   aiSessionId: string
 
@@ -49,6 +51,14 @@ export interface Config {
   reviewSkipAuthors: string[]
 }
 
+/**
+ * DeepSeek V4.1 Flash on OpenCode Go documents a 384k output limit. Reasoning
+ * tokens share this budget, so keep plenty of headroom for the final JSON.
+ */
+export const DEFAULT_AI_MAX_OUTPUT_TOKENS = 32_000
+/** Documented max output of DeepSeek V4.1 Flash; larger values get a 400. */
+export const AI_MAX_OUTPUT_TOKENS_CAP = 384_000
+
 export const DEFAULT_REVIEW_SKIP_AUTHORS = [
   "dependabot[bot]",
   "renovate[bot]",
@@ -67,6 +77,11 @@ function str(value: string | undefined): string | undefined {
 function int(value: string | undefined, fallback: number): number {
   const parsed = Number.parseInt(value ?? "", 10)
   return Number.isFinite(parsed) ? parsed : fallback
+}
+
+function positiveInt(value: string | undefined, fallback: number): number {
+  const parsed = int(value, fallback)
+  return parsed > 0 ? parsed : fallback
 }
 
 function oneOf<T extends string>(value: string | undefined, allowed: readonly T[], fallback: T): T {
@@ -126,6 +141,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     aiBaseUrl: str(env.AI_BASE_URL) ?? "https://opencode.ai/inference/go/openai/v1",
     aiModel: str(env.AI_MODEL) ?? "deepseek-v4.1-flash",
     aiReasoningMode: oneOf(env.AI_REASONING_MODE, ["off", "low", "high", "max"] as const, "off"),
+    aiMaxOutputTokens: Math.min(
+      positiveInt(env.AI_MAX_OUTPUT_TOKENS, DEFAULT_AI_MAX_OUTPUT_TOKENS),
+      AI_MAX_OUTPUT_TOKENS_CAP,
+    ),
     aiSessionId: str(env.AI_SESSION_ID) ?? "valentinvera-reviewer",
 
     queuePollMs: int(env.QUEUE_POLL_MS, 1_000),
