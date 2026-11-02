@@ -160,7 +160,7 @@ async function callModel(input: ModelCallInput): Promise<{
       system,
       prompt,
       temperature: 0.1,
-      maxOutputTokens: 12_000,
+      maxOutputTokens: config.aiMaxOutputTokens,
       maxRetries: 2,
       abortSignal: AbortSignal.timeout(240_000),
     })

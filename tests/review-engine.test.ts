@@ -137,6 +137,28 @@ describe("generateReview", () => {
     expect(model.doGenerateCalls[0]?.responseFormat?.type).toBe("json")
   })
 
+  test("sends the configured output budget to the model", async () => {
+    const model = mockModel()
+    await generateReview({ repo: "valentinvera/plata", pr, diff, model })
+
+    expect(model.doGenerateCalls[0]?.maxOutputTokens).toBe(config.aiMaxOutputTokens)
+  })
+
+  test("uses the configured output budget for every diff chunk", async () => {
+    const diff = bigDiff()
+    const chunks = chunkDiffBySize(diff, config.reviewChunkChars)
+    const model = new MockLanguageModelV4({
+      doGenerate: chunks.map((_, index) => chunkResult(index)),
+    })
+
+    await generateReview({ repo: "valentinvera/plata", pr, diff, model })
+
+    expect(model.doGenerateCalls).toHaveLength(chunks.length)
+    for (const call of model.doGenerateCalls) {
+      expect(call.maxOutputTokens).toBe(config.aiMaxOutputTokens)
+    }
+  })
+
   test("chunks large diffs and merges partial results", async () => {
     const diff = bigDiff()
     const chunks = chunkDiffBySize(diff, config.reviewChunkChars)
