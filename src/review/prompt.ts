@@ -1,5 +1,3 @@
-import type { ReviewLanguage } from "../config"
-
 export interface ReviewPullRequest {
   number: number
   title: string
@@ -20,14 +18,8 @@ export interface ReviewPromptInput {
   diff: string
   truncated: boolean
   maxFindings: number
-  language: ReviewLanguage
   /** Set when the diff is reviewed in several calls. */
   scope?: { index: number; total: number } | null
-}
-
-const LANGUAGE_NAME: Record<ReviewLanguage, string> = {
-  es: "Spanish (rioplatense, neutral and professional)",
-  en: "English",
 }
 
 export function buildReviewPrompt(input: ReviewPromptInput): { system: string; prompt: string } {
@@ -55,7 +47,7 @@ export function buildReviewPrompt(input: ReviewPromptInput): { system: string; p
     "- If there is nothing significant, return an empty findings array and say so in the summary.",
     "- Be concrete: explain the failure mode and the fix. No generic advice, no filler.",
     "",
-    `Write the summary and every finding body in ${LANGUAGE_NAME[input.language]}.`,
+    "Write the summary and every finding title and body in English, even when the pull request, its description or code comments are in another language.",
     "Keep code identifiers, file paths and error messages as-is.",
   ].join("\n")
 

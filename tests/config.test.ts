@@ -14,7 +14,6 @@ describe("loadConfig", () => {
     expect(config.jobMaxAttempts).toBe(3)
     expect(config.queuePollMs).toBe(1000)
     expect(config.workerEnabled).toBe(true)
-    expect(config.reviewLanguage).toBe("es")
     expect(config.reviewMaxDiffChars).toBe(240_000)
     expect(config.reviewMaxFindings).toBe(12)
     expect(config.reviewChunkChars).toBe(16_000)
@@ -32,7 +31,6 @@ describe("loadConfig", () => {
       HOST: "127.0.0.1",
       WORKER_CONCURRENCY: "3",
       WORKER_ENABLED: "false",
-      REVIEW_LANGUAGE: "en",
       REVIEW_MAX_DIFF_CHARS: "1000",
       REVIEW_MAX_FINDINGS: "5",
       REVIEW_CHUNK_CHARS: "8000",
@@ -50,7 +48,6 @@ describe("loadConfig", () => {
     expect(config.hostname).toBe("127.0.0.1")
     expect(config.workerConcurrency).toBe(3)
     expect(config.workerEnabled).toBe(false)
-    expect(config.reviewLanguage).toBe("en")
     expect(config.reviewMaxDiffChars).toBe(1_000)
     expect(config.reviewMaxFindings).toBe(5)
     expect(config.reviewChunkChars).toBe(8_000)
