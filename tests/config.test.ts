@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { loadConfig } from "../src/config"
+import { DEFAULT_REVIEW_SKIP_AUTHORS, loadConfig } from "../src/config"
 
 describe("loadConfig", () => {
   test("uses defaults for an empty environment", () => {
@@ -23,6 +23,7 @@ describe("loadConfig", () => {
     expect(config.reviewManualMaxPerPr24h).toBe(5)
     expect(config.reviewGlobalMax24h).toBe(50)
     expect(config.maxRequestBodyBytes).toBe(10 * 1024 * 1024)
+    expect(config.reviewSkipAuthors).toEqual([...DEFAULT_REVIEW_SKIP_AUTHORS])
   })
 
   test("parses overrides", () => {
@@ -77,5 +78,31 @@ describe("loadConfig", () => {
     expect(config.aiReasoningMode).toBe("off")
     expect(config.logLevel).toBe("info")
     expect(config.maxRequestBodyBytes).toBe(10 * 1024 * 1024)
+  })
+
+  test("parses REVIEW_SKIP_AUTHORS as a trimmed, lowercased, deduplicated list", () => {
+    const config = loadConfig({
+      REVIEW_SKIP_AUTHORS: " Dependabot[bot] ,my-bot,, MY-BOT ,renovate[bot] ",
+    })
+
+    expect(config.reviewSkipAuthors).toEqual(["dependabot[bot]", "my-bot", "renovate[bot]"])
+  })
+
+  test("skips nobody when REVIEW_SKIP_AUTHORS is empty", () => {
+    expect(loadConfig({ REVIEW_SKIP_AUTHORS: "" }).reviewSkipAuthors).toEqual([])
+    expect(loadConfig({ REVIEW_SKIP_AUTHORS: " , " }).reviewSkipAuthors).toEqual([])
+  })
+
+  test("default skip list does not include code-writing agents", () => {
+    const { reviewSkipAuthors } = loadConfig({})
+
+    for (const login of [
+      "cursor[bot]",
+      "copilot-swe-agent[bot]",
+      "devin",
+      "devin-ai-integration[bot]",
+    ]) {
+      expect(reviewSkipAuthors).not.toContain(login)
+    }
   })
 })
