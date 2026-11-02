@@ -47,7 +47,19 @@ export interface Config {
   reviewManualCooldownSeconds: number
   reviewManualMaxPerPr24h: number
   reviewGlobalMax24h: number
+  /** Lowercased PR author logins whose PRs are never auto-reviewed. */
+  reviewSkipAuthors: string[]
 }
+
+export const DEFAULT_REVIEW_SKIP_AUTHORS = [
+  "dependabot[bot]",
+  "renovate[bot]",
+  "snyk-bot",
+  "pre-commit-ci[bot]",
+  "imgbot[bot]",
+  "allcontributors[bot]",
+  "release-please[bot]",
+] as const
 
 function str(value: string | undefined): string | undefined {
   const trimmed = value?.trim()
@@ -67,6 +79,11 @@ function oneOf<T extends string>(value: string | undefined, allowed: readonly T[
 function bool(value: string | undefined, fallback: boolean): boolean {
   if (value === undefined) return fallback
   return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase())
+}
+
+function list(value: string | undefined, fallback: readonly string[]): string[] {
+  const items = value === undefined ? fallback : value.split(",")
+  return [...new Set(items.map((item) => item.trim().toLowerCase()).filter(Boolean))]
 }
 
 function loadPrivateKey(inline: string | undefined, path: string | undefined): string | undefined {
@@ -126,6 +143,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     reviewManualCooldownSeconds: int(env.REVIEW_MANUAL_COOLDOWN_SECONDS, 600),
     reviewManualMaxPerPr24h: int(env.REVIEW_MANUAL_MAX_PER_PR_24H, 5),
     reviewGlobalMax24h: int(env.REVIEW_GLOBAL_MAX_24H, 50),
+    reviewSkipAuthors: list(env.REVIEW_SKIP_AUTHORS, DEFAULT_REVIEW_SKIP_AUTHORS),
   }
 }
 
