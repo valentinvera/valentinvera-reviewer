@@ -56,6 +56,8 @@ export interface Config {
  * tokens share this budget, so keep plenty of headroom for the final JSON.
  */
 export const DEFAULT_AI_MAX_OUTPUT_TOKENS = 32_000
+/** Documented max output of DeepSeek V4.1 Flash; larger values get a 400. */
+export const AI_MAX_OUTPUT_TOKENS_CAP = 384_000
 
 export const DEFAULT_REVIEW_SKIP_AUTHORS = [
   "dependabot[bot]",
@@ -139,7 +141,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     aiBaseUrl: str(env.AI_BASE_URL) ?? "https://opencode.ai/inference/go/openai/v1",
     aiModel: str(env.AI_MODEL) ?? "deepseek-v4.1-flash",
     aiReasoningMode: oneOf(env.AI_REASONING_MODE, ["off", "low", "high", "max"] as const, "off"),
-    aiMaxOutputTokens: positiveInt(env.AI_MAX_OUTPUT_TOKENS, DEFAULT_AI_MAX_OUTPUT_TOKENS),
+    aiMaxOutputTokens: Math.min(
+      positiveInt(env.AI_MAX_OUTPUT_TOKENS, DEFAULT_AI_MAX_OUTPUT_TOKENS),
+      AI_MAX_OUTPUT_TOKENS_CAP,
+    ),
     aiSessionId: str(env.AI_SESSION_ID) ?? "valentinvera-reviewer",
 
     queuePollMs: int(env.QUEUE_POLL_MS, 1_000),

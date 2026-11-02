@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import {
+  AI_MAX_OUTPUT_TOKENS_CAP,
   DEFAULT_AI_MAX_OUTPUT_TOKENS,
   DEFAULT_REVIEW_SKIP_AUTHORS,
   loadConfig,
@@ -91,6 +92,13 @@ describe("loadConfig", () => {
         DEFAULT_AI_MAX_OUTPUT_TOKENS,
       )
     }
+  })
+
+  test("caps AI_MAX_OUTPUT_TOKENS at the model's documented output limit", () => {
+    expect(loadConfig({ AI_MAX_OUTPUT_TOKENS: "384000" }).aiMaxOutputTokens).toBe(384_000)
+    expect(loadConfig({ AI_MAX_OUTPUT_TOKENS: "1000000000" }).aiMaxOutputTokens).toBe(
+      AI_MAX_OUTPUT_TOKENS_CAP,
+    )
   })
 
   test("parses REVIEW_SKIP_AUTHORS as a trimmed, lowercased, deduplicated list", () => {
