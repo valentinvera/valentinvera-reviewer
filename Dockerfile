@@ -17,18 +17,22 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 
+# The pinned base image ships outdated Debian packages. Apply security updates
+# before copying app files so this layer stays cached across source changes.
+# --with-new-pkgs installs new packages those updates require, without the
+# broader package replacements of dist-upgrade. Drop apt lists to keep the
+# layer small. Stay root for apt, then switch to the non-root bun user.
+USER root
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends --with-new-pkgs \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=deps --chown=bun:bun /app/node_modules ./node_modules
 COPY --chown=bun:bun package.json ./
 COPY --chown=bun:bun src ./src
 COPY --chown=bun:bun scripts ./scripts
 
 RUN mkdir -p /app/data && chown bun:bun /app /app/data
-
-# The pinned base image ships outdated Debian packages. Apply the available
-# security updates here and drop the package lists to keep the layer small.
-RUN apt-get update \
-    && apt-get upgrade -y --no-install-recommends \
-    && rm -rf /var/lib/apt/lists/*
 
 USER bun
 
