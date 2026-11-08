@@ -41,14 +41,21 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # Load the image and scan it before any registry push. provenance is off
+      # because the docker exporter cannot load an attestation manifest list;
+      # the following push publishes this scanned image, not a second build.
       - uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64
-          push: true
-          tags: |
-            ghcr.io/valentinvera/valentinvera-reviewer:${{ github.sha }}
-            ghcr.io/valentinvera/valentinvera-reviewer:latest
+          load: true
+          push: false
+          provenance: false
+          tags: valentinvera-reviewer:candidate
+          # Required by the Dockerfile. Unique per run, so mode=max cannot
+          # restore a previous apt upgrade layer. The deps stage stays cached.
+          build-args: |
+            OS_SECURITY_REVISION=${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           labels: |
@@ -57,6 +64,22 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ github.sha }}
+      - name: Scan image before push
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: valentinvera-reviewer:candidate
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          vuln-type: os,library
+      - name: Push scanned image
+        run: |
+          image="ghcr.io/valentinvera/valentinvera-reviewer"
+          docker tag valentinvera-reviewer:candidate "${image}:${GITHUB_SHA}"
+          docker tag valentinvera-reviewer:candidate "${image}:latest"
+          docker push "${image}:${GITHUB_SHA}"
+          docker push "${image}:latest"
 
   deploy:
     needs: build
