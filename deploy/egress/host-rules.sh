@@ -9,11 +9,17 @@ table="reviewer_egress"
 app_bridge="br-vvr-app"
 egress_bridge="br-vvr-egress"
 proxy_ip="172.30.208.2"
+app_network=""
+egress_network=""
 if_bridges_present=0
+confirm_stopped=0
 action="status"
+nft_cmd="${EGRESS_NFT:-nft}"
+docker_cmd="${EGRESS_DOCKER:-docker}"
+lock_dir="${EGRESS_LOCK_DIR:-/run/lock}"
 
 usage() {
-  echo "usage: host-rules.sh {install|status|rollback} [--table NAME] [--app-bridge IF] [--egress-bridge IF] [--proxy-ip ADDR] [--if-bridges-present]" >&2
+  echo "usage: host-rules.sh {install|status|rollback} [--table NAME] [--app-bridge IF] [--egress-bridge IF] [--proxy-ip ADDR] [--app-network NAME] [--egress-network NAME] [--if-bridges-present] [--confirm-stopped]" >&2
   exit 1
 }
 
@@ -24,24 +30,46 @@ while [ $# -gt 0 ]; do
     --app-bridge) app_bridge="$2"; shift 2 ;;
     --egress-bridge) egress_bridge="$2"; shift 2 ;;
     --proxy-ip) proxy_ip="$2"; shift 2 ;;
+    --app-network) app_network="$2"; shift 2 ;;
+    --egress-network) egress_network="$2"; shift 2 ;;
     --if-bridges-present) if_bridges_present=1; shift ;;
+    --confirm-stopped) confirm_stopped=1; shift ;;
     *) usage ;;
   esac
 done
 
+stage_name() {
+  printf '%s\n' "$1" | grep -Eq "$2"
+}
+
 case "$table" in
   reviewer_egress|reviewer_egress_ci|reviewer_egress_staging) ;;
-  *) echo "refusing unexpected table $table" >&2; exit 1 ;;
+  *)
+    stage_name "$table" '^reviewer_egress_s[0-9a-f]{6}$' || {
+      echo "refusing unexpected table $table" >&2
+      exit 1
+    }
+    ;;
 esac
 
 case "$app_bridge" in
   br-vvr-app|br-vvr-cia|br-vvr-stga) ;;
-  *) echo "refusing unexpected app bridge $app_bridge" >&2; exit 1 ;;
+  *)
+    stage_name "$app_bridge" '^br-vvr-s[0-9a-f]{6}a$' || {
+      echo "refusing unexpected app bridge $app_bridge" >&2
+      exit 1
+    }
+    ;;
 esac
 
 case "$egress_bridge" in
   br-vvr-egress|br-vvr-cie|br-vvr-stge) ;;
-  *) echo "refusing unexpected egress bridge $egress_bridge" >&2; exit 1 ;;
+  *)
+    stage_name "$egress_bridge" '^br-vvr-s[0-9a-f]{6}e$' || {
+      echo "refusing unexpected egress bridge $egress_bridge" >&2
+      exit 1
+    }
+    ;;
 esac
 
 if [ "$app_bridge" = "$egress_bridge" ]; then
@@ -49,13 +77,31 @@ if [ "$app_bridge" = "$egress_bridge" ]; then
   exit 1
 fi
 
+case "$app_bridge" in
+  br-vvr-s*)
+    app_tag=$(printf '%s\n' "$app_bridge" | sed 's/^br-vvr-s//; s/a$//')
+    egress_tag=$(printf '%s\n' "$egress_bridge" | sed 's/^br-vvr-s//; s/e$//')
+    table_tag=$(printf '%s\n' "$table" | sed 's/^reviewer_egress_s//')
+    if [ "$app_tag" != "$egress_tag" ] || [ "$app_tag" != "$table_tag" ]; then
+      echo "refusing mismatched stage names" >&2
+      exit 1
+    fi
+    ;;
+esac
+
 case "${app_bridge}:${proxy_ip}" in
   br-vvr-app:172.30.208.2|br-vvr-cia:172.30.209.2|br-vvr-stga:172.30.210.2) ;;
+  br-vvr-s*)
+    printf '%s\n' "$proxy_ip" | awk -F. 'BEGIN { ok=0 } $1==172 && $2==30 && $4==2 && $3+0>=128 && $3+0<=251 && $3+0!=208 && $3+0!=209 && $3+0!=210 && $3+0!=216 && $3+0!=217 && $3+0!=218 { ok=1 } END { exit ok ? 0 : 1 }' || {
+      echo "refusing proxy $proxy_ip on $app_bridge" >&2
+      exit 1
+    }
+    ;;
   *) echo "refusing proxy $proxy_ip on $app_bridge" >&2; exit 1 ;;
 esac
 
 bridge_present() {
-  ip link show "$1" >/dev/null 2>&1
+  "${EGRESS_IP:-ip}" link show "$1" >/dev/null 2>&1
 }
 
 rules_file() {
@@ -118,16 +164,32 @@ install_rules() {
     exit 1
   fi
 
+  if timeout 15 "$nft_cmd" list table inet "$table" >/dev/null 2>&1; then
+    echo "refusing to replace existing table inet ${table}" >&2
+    exit 1
+  fi
+
   tmp=$(mktemp)
-  trap 'rm -f "$tmp"' EXIT
   rules_file > "$tmp"
-  nft -c -f "$tmp"
-  # One transaction replaces only this table.
-  {
-    echo "delete table inet ${table}"
-    cat "$tmp"
-  } | nft -f - 2>/dev/null || nft -f "$tmp"
+  timeout 15 "$nft_cmd" -c -f "$tmp"
+  timeout 15 "$nft_cmd" -f "$tmp"
+  rm -f "$tmp"
   echo "installed inet ${table} for ${app_bridge} and ${egress_bridge}"
+}
+
+containers_running() {
+  set --
+  if [ -n "$app_network" ]; then
+    set -- "$@" -e "$app_network"
+  fi
+  if [ -n "$egress_network" ]; then
+    set -- "$@" -e "$egress_network"
+  fi
+  if [ $# -eq 0 ]; then
+    return 1
+  fi
+  listed=$(timeout 15 "$docker_cmd" ps --filter status=running --format '{{.Names}} {{.Networks}}' 2>/dev/null || true)
+  printf '%s\n' "$listed" | grep -F "$@" >/dev/null 2>&1
 }
 
 status_rules() {
@@ -135,8 +197,8 @@ status_rules() {
     echo "required bridge is missing" >&2
     exit 1
   fi
-  nft list table inet "$table" >/dev/null
-  listed=$(nft list table inet "$table")
+  timeout 15 "$nft_cmd" list table inet "$table" >/dev/null
+  listed=$(timeout 15 "$nft_cmd" list table inet "$table")
   for needle in "$app_bridge" "$egress_bridge" "$proxy_ip" "tcp dport 3128" "tcp dport 443" "100.64.0.0/10" "169.254.0.0/16"; do
     if ! printf '%s\n' "$listed" | grep -q -F "$needle"; then
       echo "table ${table} is missing ${needle}" >&2
@@ -147,24 +209,34 @@ status_rules() {
 }
 
 rollback_rules() {
-  if nft list table inet "$table" >/dev/null 2>&1; then
-    nft delete table inet "$table"
+  if [ "$confirm_stopped" -ne 1 ]; then
+    echo "rollback requires --confirm-stopped and is not part of staging failure" >&2
+    exit 1
+  fi
+  if containers_running; then
+    echo "refusing rollback while staged containers are running" >&2
+    exit 1
+  fi
+  if timeout 15 "$nft_cmd" list table inet "$table" >/dev/null 2>&1; then
+    timeout 15 "$nft_cmd" delete table inet "$table"
     echo "removed inet ${table}"
   else
     echo "inet ${table} was not installed"
   fi
 }
 
+with_lock() {
+  mkdir -p "$lock_dir"
+  exec 9>"${lock_dir}/${table}.lock"
+  if ! flock -w 15 9; then
+    echo "timed out waiting for ${lock_dir}/${table}.lock" >&2
+    exit 1
+  fi
+  "$@"
+}
+
 case "$action" in
-  install)
-    exec 9>"/run/lock/${table}.lock"
-    flock 9
-    install_rules
-    ;;
+  install) with_lock install_rules ;;
   status) status_rules ;;
-  rollback)
-    exec 9>"/run/lock/${table}.lock"
-    flock 9
-    rollback_rules
-    ;;
+  rollback) with_lock rollback_rules ;;
 esac
