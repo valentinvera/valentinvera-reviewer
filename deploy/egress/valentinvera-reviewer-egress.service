@@ -1,0 +1,13 @@
+[Unit]
+Description=App-only egress filter for valentinvera-reviewer
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/valentinvera-reviewer-egress install --if-bridges-present
+# No ExecStop. Rollback is an explicit host-rules.sh rollback.
+
+[Install]
+WantedBy=multi-user.target

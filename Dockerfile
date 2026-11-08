@@ -45,11 +45,15 @@ COPY --from=deps --chown=bun:bun /app/node_modules ./node_modules
 COPY --chown=bun:bun package.json ./
 COPY --chown=bun:bun src ./src
 COPY --chown=bun:bun scripts ./scripts
+COPY deploy/egress/app-entrypoint.sh /usr/local/bin/app-entrypoint.sh
 
-RUN mkdir -p /app/data && chown bun:bun /app /app/data
+RUN mkdir -p /app/data && chown bun:bun /app /app/data \
+    && chmod 0555 /usr/local/bin/app-entrypoint.sh
 
 USER bun
 
 EXPOSE 3000
 
+# EGRESS_REQUIRED is unset here, so existing direct-network starts keep working.
+ENTRYPOINT ["/usr/local/bin/app-entrypoint.sh"]
 CMD ["bun", "run", "start"]
