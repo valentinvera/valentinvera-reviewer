@@ -20,13 +20,30 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# Production, CI and the documented staging example, plus a host-stage /24
+# chosen outside those octets and outside 172.18.0.0/16.
 case "$bind" in
   172.30.208.2:3128|172.30.209.2:3128|172.30.210.2:3128) ;;
+  172.30.*.2:3128)
+    octet=$(printf '%s\n' "$bind" | awk -F. '{ print $3 }')
+    printf '%s\n' "$octet" | awk 'BEGIN { ok=0 } $1+0>=128 && $1+0<=251 && $1+0!=208 && $1+0!=209 && $1+0!=210 && $1+0!=216 && $1+0!=217 && $1+0!=218 { ok=1 } END { exit ok ? 0 : 1 }' || {
+      echo "refusing PROXY bind $bind" >&2
+      exit 1
+    }
+    ;;
   *) echo "refusing PROXY bind $bind" >&2; exit 1 ;;
 esac
 
 case "$src" in
   172.30.208.0/24|172.30.209.0/24|172.30.210.0/24) ;;
+  172.30.*.0/24)
+    src_octet=$(printf '%s\n' "$src" | awk -F. '{ print $3 }')
+    bind_octet=$(printf '%s\n' "$bind" | awk -F. '{ print $3 }')
+    if [ "$src_octet" != "$bind_octet" ]; then
+      echo "refusing PROXY source $src for bind $bind" >&2
+      exit 1
+    fi
+    ;;
   *) echo "refusing PROXY source $src" >&2; exit 1 ;;
 esac
 
@@ -64,6 +81,12 @@ if [ -n "$fixture_name" ] || [ -n "$fixture_dst" ]; then
   fi
   case "$fixture_dst" in
     172.30.217.10/32|172.30.218.10/32) ;;
+    172.30.*.10/32)
+      printf '%s\n' "$fixture_dst" | awk -F. 'BEGIN { ok=0 } $3+0>=128 && $3+0<=251 && $3+0!=208 && $3+0!=209 && $3+0!=210 && $3+0!=216 && $3+0!=217 && $3+0!=218 { ok=1 } END { exit ok ? 0 : 1 }' || {
+        echo "refusing fixture destination $fixture_dst" >&2
+        exit 1
+      }
+      ;;
     *) echo "refusing fixture destination $fixture_dst" >&2; exit 1 ;;
   esac
 fi
@@ -124,20 +147,22 @@ acl bogon dst ff00::/8
 
 http_access deny !app_net
 http_access deny !CONNECT
-http_access deny CONNECT !SSL_ports
-http_access deny ip_literal
 EOF
 
 if [ -n "$fixture_name" ]; then
   cat <<EOF
-# Test-only exception so a local fixture on this subnet can hold a quiet tunnel.
+# Test-only exception. The fixture listens on 8443 so it can run without
+# binding a privileged port. Production output never includes these lines.
 acl fixture_name dstdomain ${fixture_name}
 acl fixture_dst dst ${fixture_dst}
-http_access allow CONNECT fixture_name fixture_dst
+acl fixture_port port 8443
+http_access allow CONNECT fixture_name fixture_dst fixture_port
 EOF
 fi
 
 cat <<'EOF'
+http_access deny CONNECT !SSL_ports
+http_access deny ip_literal
 http_access deny bogon
 http_access allow CONNECT allowed
 http_access deny all

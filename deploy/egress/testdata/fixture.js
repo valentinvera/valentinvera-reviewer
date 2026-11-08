@@ -1,5 +1,5 @@
 Bun.serve({
-  port: 443,
+  port: 8443,
   hostname: "0.0.0.0",
   tls: {
     cert: await Bun.file("/certs/srv.crt").text(),
@@ -17,7 +17,7 @@ Bun.serve({
     if (path === "/redir") {
       return new Response(null, {
         status: 302,
-        headers: { Location: "https://blocked.fixture/nope" },
+        headers: { Location: "https://blocked.fixture:8443/nope" },
       })
     }
     return new Response("ok")
