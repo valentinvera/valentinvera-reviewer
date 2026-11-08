@@ -26,6 +26,19 @@ if printf '%s\n' "$rendered" | grep -q 'ssl_bump\|fixture_name\|8443'; then
   fail "production config contains a fixture or TLS inspection"
 fi
 "$root/render-squid-conf.sh" --bind 0.0.0.0:3128 --src 172.30.208.0/24 --allow-file "$root/allowlist" >/dev/null 2>&1 && fail "wide bind was accepted"
+proxy_from=$(awk '/^FROM / { print; exit }' "$root/Dockerfile")
+relay_from=$(awk '/^FROM / { print; exit }' "$root/Dockerfile.ingress")
+[ "$proxy_from" = "$relay_from" ] || fail "proxy and relay base digests differ"
+printf '%s\n' "$proxy_from" | grep -q 'alpine:3.22.8@sha256:9db2934886712d877c932e07249c75a59e6ca27adfbccc05261987a17bef2d63' || fail "proxy base is not the pinned Alpine 3.22.8 manifest"
+if grep -q '4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1' "$root/Dockerfile" "$root/Dockerfile.ingress"; then
+  fail "an image still uses the July 2025 Alpine digest"
+fi
+grep -q "squid=6.12-r0" "$root/Dockerfile" || fail "squid is not pinned"
+grep -q "socat=1.8.1.3-r0" "$root/Dockerfile.ingress" || fail "socat is not pinned"
+grep -q "zlib=1.4-r0" "$root/Dockerfile" || fail "zlib is not pinned in the proxy image"
+grep -q "zlib=1.4-r0" "$root/Dockerfile.ingress" || fail "zlib is not pinned in the relay image"
+grep -q "libssl3=3.5.9-r0" "$root/Dockerfile" || fail "libssl3 is not pinned in the proxy image"
+grep -q "libssl3=3.5.9-r0" "$root/Dockerfile.ingress" || fail "libssl3 is not pinned in the relay image"
 "$root/render-squid-conf.sh" --bind 172.30.140.2:3128 --src 172.30.140.0/24 --allow-file "$root/allowlist" \
   --fixture-name idle.fixture --fixture-dst 172.30.141.10/32 > "$work/stage.conf"
 grep -q 'acl fixture_port port 8443' "$work/stage.conf" || fail "fixture port missing"

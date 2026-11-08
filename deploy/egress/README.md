@@ -223,7 +223,7 @@ source-port checks have not passed. The cloud VM bridge failure was not
 rerun and is not evidence about this host.
 
 The relay image uses the same Alpine digest as the proxy and `socat=1.8.1.3-r0`.
-It was not scanned. It runs as uid 65534, read-only, with every capability
+It runs as uid 65534, read-only, with every capability
 dropped. It has no secret, data, backup, or Docker socket mount. A compromised
 relay can still try to use the publish-network route until those nft rules
 exist, and it can open TCP to the single app address it is given. It cannot
@@ -293,11 +293,13 @@ seconds.
 
 ## Proxy image
 
-The proxy image pin is unchanged: Alpine 3.22.1
-`sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1`
-and Squid 6.12-r0. The ingress image uses that same Alpine digest and
-`socat=1.8.1.3-r0`. This revision did not scan either image, so neither is
-marked safe here. The process is intended to run as uid 31, drop every capability,
+The proxy and relay images use Alpine 3.22.8 amd64
+`sha256:9db2934886712d877c932e07249c75a59e6ca27adfbccc05261987a17bef2d63`,
+Squid 6.12-r0, and socat 1.8.1.3-r0. OpenSSL, musl, BusyBox, and zlib are
+pinned as well. `apk add` of Squid or socat does not upgrade packages already
+in the base, so those pins are explicit. A cloud package scan is not a runtime
+or production proof, and it does not mark either image safe. The process is
+intended to run as uid 31, drop every capability,
 and mount no secret, backup, data, or Docker socket. Squid would see the
 CONNECT hostname and the resolved address, not the TLS payload. The staging
 fixture listens on 8443 without an added capability. That exception is only in
