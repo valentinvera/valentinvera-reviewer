@@ -78,6 +78,9 @@ grep -q '^PORT=20129$' "$work/ok.plan" && fail "plan reused the retained e7b421 
 "$root/host-stage.sh" plan --inventory "$work/empty-inventory" --suffix b83c52 --plan "$work/retained-b8.plan" --stage-dir "$work" >/dev/null 2>"$work/retained-b8.err" && fail "retained b83c52 stage was planned"
 grep -q 'refusing retained stage' "$work/retained-b8.err" || fail "retained b83c52 refusal missing"
 grep -q '^PORT=20566$' "$work/ok.plan" && fail "plan reused the retained b83c52 port"
+"$root/host-stage.sh" plan --inventory "$work/empty-inventory" --suffix 7fa384 --plan "$work/retained-7f.plan" --stage-dir "$work" >/dev/null 2>"$work/retained-7f.err" && fail "retained 7fa384 stage was planned"
+grep -q 'refusing retained stage' "$work/retained-7f.err" || fail "retained 7fa384 refusal missing"
+grep -q '^PORT=20332$' "$work/ok.plan" && fail "plan reused the retained 7fa384 port"
 "$root/host-stage.sh" preflight --inventory "$work/empty-inventory" --plan "$work/ok.plan" >/dev/null
 "$root/host-stage.sh" preflight --inventory "$work/inventory" --plan "$work/ok.plan" >/dev/null 2>"$work/preflight.err" && fail "preflight replaced an existing bridge"
 grep -q 'refusing to replace' "$work/preflight.err" || fail "preflight did not refuse"
@@ -265,9 +268,18 @@ fi
 if ! grep -q 'quiet tunnel after nft' "$root/host-stage.sh"; then
   fail "quiet tunnel is not repeated after nft"
 fi
-if ! grep -q 'bound_flow' "$root/host-stage.sh"; then
-  fail "source-port flows are not exercised"
+quiet_line=$(awk '/quiet tunnel after nft/ { print NR; exit }' "$root/host-stage.sh")
+case_line=$(awk '/record_case / { print NR; exit }' "$root/host-stage.sh")
+[ -n "$quiet_line" ] && [ -n "$case_line" ] && [ "$quiet_line" -lt "$case_line" ] || fail "a negative case is recorded before the post-rule quiet tunnel"
+if grep -q 'stage_fail "could not bind' "$root/host-stage.sh"; then
+  fail "a bind miss still aborts before the remaining cases"
 fi
+if grep -q 'proxy-false "https://api.github.com/' "$root/host-stage.sh"; then
+  fail "direct fetch still depends on GitHub DNS"
+fi
+for label in sport8080-proof sport8080-relay direct-tcp-proxy443 dns-udp-127.0.0.11 host-local-443 udp-quic-443 private-10 metadata-link-local cgnat-tailscale-range ipv6 redirect proxy-down relay-egress; do
+  grep -q "$label" "$root/host-stage.sh" || fail "missing case $label"
+done
 : > "$NFT_LOG"
 "$root/host-rules.sh" install \
   --table reviewer_egress_sabcdef \
@@ -614,6 +626,72 @@ if grep -q 'timed out a request after 10 seconds' "$idle_dir/server.log"; then
   fail "fixture logged Bun's 10s idle timeout"
 fi
 echo "fixture stayed quiet ${idle_elapsed}s; the 310s host proof was not run"
+
+echo "== listen port can be released and bound"
+hold_port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+hold_dir="$work/hold"
+mkdir -p "$hold_dir"
+: > "$hold_dir/control"
+HEALTH_PORT="$hold_port" HEALTH_BIND=127.0.0.1 HEALTH_CONTROL="$hold_dir/control" HEALTH_STATE="$hold_dir/state" \
+  bun "$root/testdata/health.js" >"$hold_dir/health.log" 2>&1 &
+hold_pid=$!
+n=0
+while [ "$n" -lt 50 ]; do
+  if grep -q '^listening' "$hold_dir/state" 2>/dev/null; then
+    break
+  fi
+  n=$((n + 1))
+  sleep 0.1
+done
+grep -q '^listening' "$hold_dir/state" || {
+  kill "$hold_pid" 2>/dev/null || true
+  wait "$hold_pid" 2>/dev/null || true
+  fail "health listener did not start"
+}
+bun "$root/testdata/client.js" bind-proof "$hold_port" 127.0.0.1 >"$hold_dir/busy.out" 2>"$hold_dir/busy.err" && fail "bind succeeded while the health listener held the port"
+grep -q 'EADDRINUSE' "$hold_dir/busy.err" || {
+  kill "$hold_pid" 2>/dev/null || true
+  wait "$hold_pid" 2>/dev/null || true
+  fail "occupied listen port was not reported as EADDRINUSE"
+}
+printf 'release\n' > "$hold_dir/control"
+n=0
+while [ "$n" -lt 50 ]; do
+  if grep -q '^released' "$hold_dir/state" 2>/dev/null; then
+    break
+  fi
+  n=$((n + 1))
+  sleep 0.1
+done
+grep -q '^released' "$hold_dir/state" || {
+  kill "$hold_pid" 2>/dev/null || true
+  wait "$hold_pid" 2>/dev/null || true
+  fail "health listener did not release the port"
+}
+bun "$root/testdata/client.js" bind-proof "$hold_port" 127.0.0.1 >"$hold_dir/proof.out" 2>"$hold_dir/proof.err" || {
+  kill "$hold_pid" 2>/dev/null || true
+  wait "$hold_pid" 2>/dev/null || true
+  cat "$hold_dir/proof.err" >&2 || true
+  fail "source port could not handshake after the listener released it"
+}
+grep -q "connected 127.0.0.1:${hold_port}" "$hold_dir/proof.out" || fail "proof handshake did not use the released port"
+printf 'listen\n' > "$hold_dir/control"
+n=0
+while [ "$n" -lt 50 ]; do
+  if grep -q '^listening' "$hold_dir/state" 2>/dev/null; then
+    break
+  fi
+  n=$((n + 1))
+  sleep 0.1
+done
+curl -fsS "http://127.0.0.1:${hold_port}/" | grep -q ok || {
+  kill "$hold_pid" 2>/dev/null || true
+  wait "$hold_pid" 2>/dev/null || true
+  fail "health listener did not answer after it was restored"
+}
+kill "$hold_pid" 2>/dev/null || true
+wait "$hold_pid" 2>/dev/null || true
+echo "listen port conflict is visible, and the same port can bind after release"
 
 echo "static checks passed; live transport was not run"
 echo "work directory retained at $keep"

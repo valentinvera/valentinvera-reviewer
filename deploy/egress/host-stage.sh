@@ -65,7 +65,8 @@ reserved_value() {
   case "$1" in
     a41b73|sa41b73|vvrsta41b73|vvrsta41b73a|vvrsta41b73e|br-vvr-sa41b73a|br-vvr-sa41b73e|reviewer_egress_sa41b73|172.30.149.0/24|172.30.150.0/24|20831|\
     e7b421|se7b421|vvrste7b421|vvrste7b421a|vvrste7b421e|vvrste7b421i|vvrste7b421p|br-vvr-se7b421a|br-vvr-se7b421e|br-vvr-se7b421i|br-vvr-se7b421p|reviewer_egress_se7b421|172.30.167.0/24|172.30.168.0/24|172.30.169.0/24|172.30.170.0/24|20129|\
-    b83c52|sb83c52|vvrstb83c52|vvrstb83c52a|vvrstb83c52e|vvrstb83c52i|vvrstb83c52p|br-vvr-sb83c52a|br-vvr-sb83c52e|br-vvr-sb83c52i|br-vvr-sb83c52p|reviewer_egress_sb83c52|172.30.154.0/24|172.30.155.0/24|172.30.156.0/24|172.30.157.0/24|20566)
+    b83c52|sb83c52|vvrstb83c52|vvrstb83c52a|vvrstb83c52e|vvrstb83c52i|vvrstb83c52p|br-vvr-sb83c52a|br-vvr-sb83c52e|br-vvr-sb83c52i|br-vvr-sb83c52p|reviewer_egress_sb83c52|172.30.154.0/24|172.30.155.0/24|172.30.156.0/24|172.30.157.0/24|20566|\
+    7fa384|s7fa384|vvrst7fa384|vvrst7fa384a|vvrst7fa384e|vvrst7fa384i|vvrst7fa384p|br-vvr-s7fa384a|br-vvr-s7fa384e|br-vvr-s7fa384i|br-vvr-s7fa384p|reviewer_egress_s7fa384|172.30.190.0/24|172.30.191.0/24|172.30.192.0/24|172.30.193.0/24|20332)
       return 0
       ;;
   esac
@@ -520,6 +521,7 @@ EOF
   client_id=$("$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" ps -q client)
   ingress_id=$("$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" ps -q ingress)
   proxy_id=$("$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" ps -q proxy)
+  fixture_id=$("$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" ps -q fixture)
   tcp_ok=0
   publish_ok=0
   if timeout 8 "$docker_cmd" exec "$client_id" bun /opt/client.js direct "$(plan_get PROXY_IP)" 3128; then
@@ -545,10 +547,66 @@ EOF
   client_exec() {
     timeout "$1" "$docker_cmd" exec "$client_id" bun /opt/client.js "$2" "$3"
   }
-  client_exec 25 https "https://api.github.com/" | grep -q '^200 ' || stage_fail "api.github.com"
-  client_exec 25 https "https://opencode.ai/" >/dev/null || stage_fail "opencode.ai"
-  client_exec 20 https "https://example.com/" && stage_fail "example.com was allowed"
-  client_exec 20 https "https://idle.fixture:8443/" | grep -q '^200 ' || stage_fail "fixture handshake"
+  run_in() {
+    cid=$1
+    secs=$2
+    shift 2
+    run_code=0
+    timeout "$secs" "$docker_cmd" exec "$cid" bun /opt/client.js "$@" >"$stage_dir/last.out" 2>"$stage_dir/last.err" || run_code=$?
+  }
+  err_detail() {
+    tr '\n' ' ' < "$stage_dir/last.err" | awk '{ print substr($0, 1, 180) }'
+  }
+  nft_bin=${EGRESS_NFT:-nft}
+  nft_packets() {
+    timeout 15 "$nft_bin" list table "$1" "$(plan_get TABLE)" | awk -v chain="$2" -v needle="$3" '
+      $1 == "chain" { current = $2; next }
+      current == chain && index($0, needle) {
+        for (i = 1; i <= NF; i++) if ($i == "packets") { print $(i + 1); found = 1; exit }
+      }
+      END { if (!found) exit 1 }
+    '
+  }
+  case_file="$stage_dir/cases"
+  : > "$case_file"
+  health_state() {
+    timeout 8 "$docker_cmd" exec "$client_id" bun -e 'process.stdout.write(await Bun.file("/tmp/health.state").text().catch(() => ""))'
+  }
+  release_health() {
+    timeout 8 "$docker_cmd" exec "$client_id" bun -e 'await Bun.write("/tmp/health.control", "release\n")'
+    i=0
+    while [ "$i" -lt 30 ]; do
+      state=$(health_state) || state=""
+      case "$state" in
+        released*) return 0 ;;
+      esac
+      i=$((i + 1))
+      sleep 0.1
+    done
+    return 1
+  }
+  restore_health() {
+    timeout 8 "$docker_cmd" exec "$client_id" bun -e 'await Bun.write("/tmp/health.control", "listen\n")'
+    i=0
+    while [ "$i" -lt 30 ]; do
+      state=$(health_state) || state=""
+      case "$state" in
+        listening*) return 0 ;;
+      esac
+      i=$((i + 1))
+      sleep 0.1
+    done
+    return 1
+  }
+  record_case() {
+    printf '%s %s %s\n' "$1" "$2" "$3" | tee -a "$case_file"
+    if [ "$2" = "ESCAPE" ]; then
+      if ! restore_health; then
+        echo "health listener was not restored after an escape" >&2
+      fi
+      stage_fail "containment escape: $1"
+    fi
+  }
   quiet_tunnel() {
     label=$1
     printf '%s\n' "$((idle_seconds * 1000))" > "$stage_dir/delay/ms"
@@ -561,25 +619,10 @@ EOF
     printf '0\n' > "$stage_dir/delay/ms"
     echo "$label ${elapsed}s"
   }
-  bound_flow() {
-    code=0
-    timeout 8 "$docker_cmd" exec "$client_id" bun /opt/client.js bind "$1" "$2" "$3" || code=$?
-    if [ "$code" -eq 0 ]; then
-      if [ "$4" = "allow" ]; then
-        return 0
-      fi
-      stage_fail "new flow from local port $3 to $1:$2 was accepted"
-    fi
-    if [ "$4" = "allow" ]; then
-      stage_fail "allowed flow from local port $3 to $1:$2 exited $code"
-    fi
-    if [ "$code" -eq 3 ]; then
-      stage_fail "could not bind local port $3, so $1:$2 was not exercised"
-    fi
-    if [ "$code" -ne 1 ]; then
-      stage_fail "bind check from local port $3 to $1:$2 exited $code"
-    fi
-  }
+  client_exec 25 https "https://api.github.com/" | grep -q '^200 ' || stage_fail "api.github.com"
+  client_exec 25 https "https://opencode.ai/" >/dev/null || stage_fail "opencode.ai"
+  client_exec 20 https "https://example.com/" && stage_fail "example.com was allowed"
+  client_exec 20 https "https://idle.fixture:8443/" | grep -q '^200 ' || stage_fail "fixture handshake"
   quiet_tunnel "quiet tunnel before nft"
   timeout 30 "$root/host-rules.sh" install \
     --table "$(plan_get TABLE)" \
@@ -601,44 +644,237 @@ EOF
     stage_fail "loopback ingress failed after nft"
   fi
   client_exec 25 https "https://api.github.com/" | grep -q '^200 ' || stage_fail "proxy path failed after nft"
-  client_exec 12 proxy-false "https://api.github.com/" && stage_fail "direct path stayed open"
-  bound_flow "$(plan_get PROXY_IP)" 3128 3128 allow
-  bound_flow "$(plan_get PROXY_IP)" 443 3128 deny
-  bound_flow "$(plan_get INGRESS_RELAY_IP)" 8080 8080 deny
-  bound_flow "$(plan_get INGRESS_GATEWAY)" 443 8080 deny
-  bound_flow "$(plan_get FIXTURE_IP)" 443 3128 deny
-  code=0
-  timeout 8 "$docker_cmd" exec "$client_id" bun /opt/client.js bind "$(plan_get INGRESS_GATEWAY)" 443 443 || code=$?
-  if [ "$code" -eq 0 ]; then
-    stage_fail "source port 443 opened a new flow"
-  fi
-  if [ "$code" -eq 1 ]; then
-    echo "source port 443 was bindable and the new flow was denied"
-  elif [ "$code" -eq 3 ]; then
-    echo "source port 443 could not be bound without privilege; that runtime check was not exercised"
-  else
-    stage_fail "source port 443 check exited $code"
-  fi
-  code=0
-  dns_out=$(timeout 8 "$docker_cmd" exec "$client_id" bun /opt/client.js dns example.com) || code=$?
-  if [ "$code" -eq 0 ]; then
-    stage_fail "example.com resolved after nft: ${dns_out}"
-  fi
-  if [ "$code" -eq 124 ]; then
-    stage_fail "dns check did not finish"
-  fi
-  code=0
-  timeout 8 "$docker_cmd" exec "$client_id" bun /opt/client.js direct 2001:db8::1 443 || code=$?
-  if [ "$code" -ne 1 ]; then
-    stage_fail "ipv6 check exited $code"
-  fi
   quiet_tunnel "quiet tunnel after nft"
+  app_ip=$(timeout 8 "$docker_cmd" exec "$client_id" bun /opt/client.js route-ip "$(plan_get PROXY_IP)" 3128 | tr -d '[:space:]') || app_ip=""
+  run_in "$client_id" 8 bind "$(plan_get PROXY_IP)" 3128 3128 "$app_ip"
+  if [ "$run_code" -eq 0 ] && grep -F -q "connected ${app_ip}:3128" "$stage_dir/last.out"; then
+    record_case sport3128-allow PASS "handshake to the proxy on 3128 from ${app_ip}:3128"
+  else
+    record_case sport3128-allow FAIL "exit ${run_code} $(err_detail)"
+  fi
+  sport3128_ok=0
+  if grep -q '^sport3128-allow PASS ' "$case_file"; then
+    sport3128_ok=1
+  fi
+  if [ "$sport3128_ok" -ne 1 ]; then
+    record_case sport3128-proxy443 NOT-EXERCISED "source port 3128 was not shown to connect"
+  else
+    before=$(nft_packets bridge forward "meta ibrname \"$(plan_get APP_BRIDGE)\" ether type ip counter") || before=""
+    run_in "$client_id" 8 bind "$(plan_get PROXY_IP)" 443 3128 "$app_ip"
+    after=$(nft_packets bridge forward "meta ibrname \"$(plan_get APP_BRIDGE)\" ether type ip counter") || after=""
+    if [ "$run_code" -eq 0 ]; then
+      record_case sport3128-proxy443 ESCAPE "handshake to proxy port 443 from source port 3128"
+    elif [ -n "$before" ] && [ -n "$after" ] && [ "$after" -gt "$before" ] && [ "$run_code" -eq 1 ]; then
+      record_case sport3128-proxy443 PASS "denied and the app bridge drop counter moved ${before} to ${after}"
+    else
+      record_case sport3128-proxy443 NOT-EXERCISED "exit ${run_code} counter ${before}->${after} $(err_detail)"
+    fi
+  fi
+  proof8080=0
+  if release_health; then
+    run_in "$client_id" 8 bind-proof 8080 "$(plan_get INGRESS_UPSTREAM_IP)"
+    if [ "$run_code" -eq 0 ] && grep -F -q "connected $(plan_get INGRESS_UPSTREAM_IP):8080" "$stage_dir/last.out"; then
+      record_case sport8080-proof PASS "handshake on the ingress address from source port 8080 without nft on that path"
+      proof8080=1
+    else
+      record_case sport8080-proof NOT-EXERCISED "exit ${run_code} $(err_detail)"
+    fi
+  else
+    record_case sport8080-proof NOT-EXERCISED "health listener did not release port 8080"
+  fi
+  if [ "$proof8080" -ne 1 ]; then
+    record_case sport8080-relay NOT-EXERCISED "source port 8080 was not shown to bind"
+    record_case sport8080-gateway NOT-EXERCISED "source port 8080 was not shown to bind"
+  else
+    run_in "$client_id" 8 bind "$(plan_get INGRESS_RELAY_IP)" 8080 8080 "$(plan_get INGRESS_UPSTREAM_IP)"
+    if [ "$run_code" -eq 0 ]; then
+      record_case sport8080-relay ESCAPE "new flow from the listen port reached the relay"
+    elif [ "$run_code" -eq 3 ]; then
+      record_case sport8080-relay NOT-EXERCISED "bind failed $(err_detail)"
+    elif [ "$run_code" -eq 1 ]; then
+      record_case sport8080-relay PASS "new flow from $(plan_get INGRESS_UPSTREAM_IP):8080 to the relay was denied $(err_detail)"
+    else
+      record_case sport8080-relay NOT-EXERCISED "exit ${run_code} $(err_detail)"
+    fi
+    before=$(nft_packets bridge input "meta ibrname \"$(plan_get INGRESS_BRIDGE)\" ether type ip counter") || before=""
+    run_in "$client_id" 8 bind "$(plan_get INGRESS_GATEWAY)" 443 8080 "$(plan_get INGRESS_UPSTREAM_IP)"
+    after=$(nft_packets bridge input "meta ibrname \"$(plan_get INGRESS_BRIDGE)\" ether type ip counter") || after=""
+    if [ "$run_code" -eq 0 ]; then
+      record_case sport8080-gateway ESCAPE "source port 8080 reached the ingress gateway"
+    elif [ "$run_code" -eq 3 ]; then
+      record_case sport8080-gateway NOT-EXERCISED "bind failed $(err_detail)"
+    elif [ -n "$before" ] && [ -n "$after" ] && [ "$after" -gt "$before" ] && [ "$run_code" -eq 1 ]; then
+      record_case sport8080-gateway PASS "denied and the ingress bridge input drop moved ${before} to ${after}"
+    else
+      record_case sport8080-gateway NOT-EXERCISED "exit ${run_code} counter ${before}->${after} $(err_detail)"
+    fi
+  fi
+  if restore_health && timeout 5 curl -fsS "http://127.0.0.1:$(plan_get PORT)/" | grep -q ok; then
+    record_case health-restored PASS "loopback health answered after the listen port was released"
+  else
+    record_case health-restored FAIL "loopback health did not answer after restoring the listener"
+  fi
+  run_in "$client_id" 8 bind "$(plan_get INGRESS_GATEWAY)" 443 443 "$(plan_get INGRESS_UPSTREAM_IP)"
+  if [ "$run_code" -eq 0 ]; then
+    record_case sport443-bind ESCAPE "source port 443 opened a flow"
+  elif [ "$run_code" -eq 1 ]; then
+    record_case sport443-bind PASS "source port 443 was bindable and the flow was denied $(err_detail)"
+  else
+    record_case sport443-bind NOT-EXERCISED "exit ${run_code} $(err_detail)"
+  fi
+  before=$(nft_packets bridge forward "meta ibrname \"$(plan_get APP_BRIDGE)\" ether type ip counter") || before=""
+  run_in "$client_id" 8 direct "$(plan_get PROXY_IP)" 443
+  after=$(nft_packets bridge forward "meta ibrname \"$(plan_get APP_BRIDGE)\" ether type ip counter") || after=""
+  if [ "$run_code" -eq 0 ]; then
+    record_case direct-tcp-proxy443 ESCAPE "direct tcp to the proxy on 443 completed"
+  elif [ -n "$before" ] && [ -n "$after" ] && [ "$after" -gt "$before" ] && [ "$run_code" -eq 1 ]; then
+    record_case direct-tcp-proxy443 PASS "numeric tcp denied and the app bridge drop moved ${before} to ${after}"
+  else
+    record_case direct-tcp-proxy443 NOT-EXERCISED "exit ${run_code} counter ${before}->${after} $(err_detail)"
+  fi
+  run_in "$client_id" 8 direct "$(plan_get FIXTURE_IP)" 8443
+  if [ "$run_code" -eq 0 ]; then
+    record_case direct-tcp-fixture-ip ESCAPE "client reached the fixture ip without the proxy"
+  elif [ "$run_code" -eq 1 ]; then
+    record_case direct-tcp-fixture-ip NOT-EXERCISED "no handshake and no scoped counter; $(err_detail)"
+  else
+    record_case direct-tcp-fixture-ip NOT-EXERCISED "exit ${run_code} $(err_detail)"
+  fi
+  run_in "$client_id" 8 dns example.com
+  if [ "$run_code" -eq 0 ] && grep -Eq '[0-9]' "$stage_dir/last.out"; then
+    record_case dns-system FAIL "system resolver returned $(tr -d '[:space:]' < "$stage_dir/last.out")"
+  elif [ "$run_code" -eq 124 ]; then
+    record_case dns-system NOT-EXERCISED "lookup did not finish"
+  else
+    record_case dns-system PASS "system resolver did not return an address"
+  fi
+  run_in "$client_id" 8 dns-udp 127.0.0.11 example.com
+  dns_udp=$(tr -d '[:space:]' < "$stage_dir/last.out")
+  if [ "$run_code" -eq 0 ]; then
+    record_case dns-udp-127.0.0.11 FAIL "direct query answered ${dns_udp}"
+  elif printf '%s' "$dns_udp" | grep -q '^TIMEOUT\|^NOANSWER'; then
+    record_case dns-udp-127.0.0.11 PASS "direct query did not answer ${dns_udp}"
+  else
+    record_case dns-udp-127.0.0.11 NOT-EXERCISED "exit ${run_code} ${dns_udp} $(err_detail)"
+  fi
+  run_in "$fixture_id" 8 direct "$(plan_get FIXTURE_IP)" 8443
+  if [ "$run_code" -ne 0 ]; then
+    record_case host-local-443 NOT-EXERCISED "fixture could not handshake to its own listener exit ${run_code} $(err_detail)"
+  else
+    before=$(nft_packets inet input "iifname \"$(plan_get EGRESS_BRIDGE)\" counter") || before=""
+    run_in "$fixture_id" 8 direct "$(plan_get EGRESS_GATEWAY)" 443
+    after=$(nft_packets inet input "iifname \"$(plan_get EGRESS_BRIDGE)\" counter") || after=""
+    if [ "$run_code" -eq 0 ]; then
+      record_case host-local-443 ESCAPE "fixture completed tcp to the egress gateway on 443"
+    elif [ -n "$before" ] && [ -n "$after" ] && [ "$after" -gt "$before" ] && [ "$run_code" -eq 1 ]; then
+      record_case host-local-443 PASS "denied and the inet input drop moved ${before} to ${after}"
+    else
+      record_case host-local-443 NOT-EXERCISED "exit ${run_code} counter ${before}->${after} $(err_detail)"
+    fi
+  fi
+  before=$(nft_packets bridge input "meta ibrname \"$(plan_get EGRESS_BRIDGE)\" ether type ip counter") || before=""
+  run_in "$fixture_id" 8 udp 192.0.2.1 443
+  after=$(nft_packets bridge input "meta ibrname \"$(plan_get EGRESS_BRIDGE)\" ether type ip counter") || after=""
+  udp_out=$(tr -d '[:space:]' < "$stage_dir/last.out")
+  if [ "$udp_out" = "reply" ] || [ "$run_code" -eq 0 ]; then
+    record_case udp-quic-443 ESCAPE "udp port 443 received a reply"
+  elif [ -n "$before" ] && [ -n "$after" ] && [ "$after" -gt "$before" ] && [ "$udp_out" = "none" ]; then
+    record_case udp-quic-443 PASS "no reply and the egress bridge input drop moved ${before} to ${after}"
+  else
+    record_case udp-quic-443 NOT-EXERCISED "exit ${run_code} ${udp_out} counter ${before}->${after} $(err_detail)"
+  fi
+  for spec in private-10:10.9.9.9 metadata-link-local:169.254.169.254 cgnat-tailscale-range:100.64.1.1; do
+    name=${spec%%:*}
+    dest=${spec#*:}
+    before=$(nft_packets inet forward "iifname \"$(plan_get EGRESS_BRIDGE)\" ip daddr @bogon4 counter") || before=""
+    run_in "$fixture_id" 8 direct "$dest" 443
+    after=$(nft_packets inet forward "iifname \"$(plan_get EGRESS_BRIDGE)\" ip daddr @bogon4 counter") || after=""
+    if [ "$run_code" -eq 0 ]; then
+      record_case "$name" ESCAPE "tcp 443 to ${dest} completed"
+    elif [ -n "$before" ] && [ -n "$after" ] && [ "$after" -gt "$before" ] && [ "$run_code" -eq 1 ]; then
+      record_case "$name" PASS "denied and the bogon drop moved ${before} to ${after}"
+    else
+      record_case "$name" NOT-EXERCISED "exit ${run_code} counter ${before}->${after} $(err_detail)"
+    fi
+  done
+  before=$(nft_packets bridge input "meta ibrname \"$(plan_get EGRESS_BRIDGE)\" ether type ip6 counter") || before=""
+  run_in "$fixture_id" 8 direct 2001:db8::1 443
+  after=$(nft_packets bridge input "meta ibrname \"$(plan_get EGRESS_BRIDGE)\" ether type ip6 counter") || after=""
+  if [ "$run_code" -eq 0 ]; then
+    record_case ipv6 ESCAPE "ipv6 tcp completed"
+  elif [ -n "$before" ] && [ -n "$after" ] && [ "$after" -gt "$before" ]; then
+    record_case ipv6 PASS "ipv6 drop counter moved ${before} to ${after}"
+  else
+    record_case ipv6 NOT-EXERCISED "exit ${run_code} counter ${before}->${after}; a missing address is not a filter proof $(err_detail)"
+  fi
+  run_in "$client_id" 20 follow "https://idle.fixture:8443/redir"
+  if [ "$run_code" -eq 0 ]; then
+    record_case redirect ESCAPE "followed redirect returned success"
+  elif [ "$run_code" -eq 124 ]; then
+    record_case redirect NOT-EXERCISED "redirect check did not finish"
+  else
+    record_case redirect PASS "redirect did not return success exit ${run_code}"
+  fi
+  if ! timeout 60 "$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" stop proxy; then
+    record_case proxy-down NOT-EXERCISED "proxy did not stop"
+    record_case proxy-restored NOT-EXERCISED "proxy was not stopped"
+  else
+  run_in "$client_id" 15 https "https://api.github.com/"
+  if [ "$run_code" -eq 0 ]; then
+    record_case proxy-down ESCAPE "github succeeded while the proxy was stopped"
+  else
+    record_case proxy-down PASS "client fetch failed while the proxy was stopped exit ${run_code}"
+  fi
+  if ! timeout 60 "$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" start proxy; then
+    record_case proxy-restored FAIL "proxy did not start"
+    proxy_back=0
+  else
+  proxy_back=0
+  i=0
+  while [ "$i" -lt 5 ]; do
+    run_in "$client_id" 20 https "https://api.github.com/"
+    if [ "$run_code" -eq 0 ] && grep -q '^200 ' "$stage_dir/last.out"; then
+      proxy_back=1
+      break
+    fi
+    i=$((i + 1))
+    sleep 1
+  done
+  if [ "$proxy_back" -eq 1 ]; then
+    record_case proxy-restored PASS "allowed github path answered after the proxy started again"
+  elif ! grep -q '^proxy-restored ' "$case_file"; then
+    record_case proxy-restored FAIL "allowed path did not return after the proxy started"
+  fi
+  fi
+  fi
+  before=$(nft_packets bridge input "meta ibrname \"$(plan_get PUBLISH_BRIDGE)\" ether type ip counter") || before=""
+  relay_code=0
+  timeout 8 "$docker_cmd" exec "$ingress_id" socat -T 3 TCP:192.0.2.1:443 - >"$stage_dir/last.out" 2>"$stage_dir/last.err" || relay_code=$?
+  after=$(nft_packets bridge input "meta ibrname \"$(plan_get PUBLISH_BRIDGE)\" ether type ip counter") || after=""
+  if [ "$relay_code" -eq 0 ]; then
+    record_case relay-egress ESCAPE "relay opened tcp to 192.0.2.1:443"
+  elif [ "$relay_code" -eq 127 ]; then
+    record_case relay-egress NOT-EXERCISED "socat is not available in the relay"
+  elif [ -n "$before" ] && [ -n "$after" ] && [ "$after" -gt "$before" ]; then
+    record_case relay-egress PASS "relay egress failed and the publish bridge input drop moved ${before} to ${after}"
+  else
+    record_case relay-egress NOT-EXERCISED "exit ${relay_code} counter ${before}->${after} $(err_detail)"
+  fi
+  for name in sport3128-allow sport3128-proxy443 sport8080-proof sport8080-relay sport8080-gateway health-restored sport443-bind direct-tcp-proxy443 direct-tcp-fixture-ip dns-system dns-udp-127.0.0.11 host-local-443 udp-quic-443 private-10 metadata-link-local cgnat-tailscale-range ipv6 redirect proxy-down proxy-restored relay-egress; do
+    if ! grep -q "^${name} " "$case_file"; then
+      record_case "$name" NOT-EXERCISED "case was not recorded"
+    fi
+  done
+  echo "case results:"
+  cat "$case_file"
+  if grep -Ev '^[^ ]+ PASS ' "$case_file" | grep -q .; then
+    stage_fail "negative matrix incomplete"
+  fi
   print_inventory
   echo "containers and inet $(plan_get TABLE) were left in place"
   echo "a quiet result before nft is not the post-rule result"
   echo "stop containers only: $root/host-stage.sh stop --plan $plan_file"
 }
-
 stop_stage() {
   [ -n "$plan_file" ] && [ -f "$plan_file" ] || {
     echo "stop needs --plan" >&2

@@ -138,7 +138,7 @@ sudo deploy/egress/host-stage.sh run --stage-dir /var/tmp/vvr-stage-manual
 Use an empty stage directory. The harness allocates a project `vvrst` plus six
 hex digits, bridges `br-vvr-s<suffix>a`, `e`, `i` and `p`, four free
 `172.30.0.0/16` /24s outside the examples above, and a loopback port in
-20000-20899. It will not reuse the retained `a41b73`, `e7b421`, or `b83c52` stages. It renders Compose
+20000-20899. It will not reuse the retained `a41b73`, `e7b421`, `b83c52`, or `7fa384` stages. It renders Compose
 and refuses the result if the app network is
 not internal or if a capability, the host network, or the Docker socket
 appears. It does not mount production data, backups, or secrets.
@@ -163,15 +163,23 @@ published port does not answer, the harness stops there. That path does not
 call GitHub or OpenCode and does not install nft. The quiet fixture is not
 shortened below 310 seconds.
 
-After the rules are installed, the client binds local ports 3128 and 8080 and
-opens new TCP flows toward the proxy on 443, the relay, the fixture on 443,
-and a gateway. A completed handshake fails the stage. If 3128 or 8080 cannot
-be bound, the stage fails because that check was not exercised. Binding local
-port 443 is attempted as well. An unprivileged process cannot bind it, and
-that result is reported as not exercised. It is not counted as a pass. The
-client also looks up `example.com` and connects to `2001:db8::1`. An answer or
-a completed connection fails the stage. Those two checks are not a DNS, IPv6,
-Tailscale, or host INPUT matrix.
+After the rules are installed, loopback and the allowed GitHub path are checked,
+and the 310 second quiet tunnel runs again before any negative case. A miss in
+one negative case is recorded and the others still run. A completed handshake
+on a flow that should be denied stops the run immediately. The result is not
+success while any required case is failed or not exercised.
+
+The source-port checks bind port 3128 on the address the client uses toward the
+proxy, and port 8080 on the ingress address the health listener uses. The
+health listener is asked to release that port and is restored afterward;
+loopback health has to answer again. A refusal from a closed port is not
+enough: source port 8080 must first complete a handshake to a listener on that
+same address. Direct TCP uses numeric addresses. A DNS failure is a separate
+case and is not a TCP deny. Host-local port 443 is a connection from the
+fixture to the egress gateway, and it counts only when the inet INPUT drop
+increases. UDP/443, the bogon ranges used for private, link-local, and
+Tailscale CGNAT addresses, IPv6, the fixture redirect, a stopped proxy, and
+relay egress are separate rows. A counter that does not move is not exercised.
 
 Docker programs a published port on the container's default-gateway network.
 An internal-only container has no gateway, so Docker 29.9.2 accepted the

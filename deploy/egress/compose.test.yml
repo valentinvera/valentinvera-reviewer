@@ -29,6 +29,7 @@ services:
       HOME: /tmp
     volumes:
       - ${TEST_DIR:?set TEST_DIR}/fixture.js:/opt/fixture.js:ro
+      - ${TEST_DIR}/client.js:/opt/client.js:ro
       - ${FIXTURE_DIR:?set FIXTURE_DIR}/srv.crt:/certs/srv.crt:ro
       - ${FIXTURE_DIR}/srv.key:/certs/srv.key:ro
       - ${TEST_DIR}/delay:/delay:ro
@@ -55,6 +56,8 @@ services:
       - 127.0.0.1
     environment:
       HOME: /tmp
+      HEALTH_BIND: ${INGRESS_UPSTREAM_IP}
+      HEALTH_PORT: ${INGRESS_LISTEN_PORT}
       HTTPS_PROXY: http://${PROXY_IP}:3128
       HTTP_PROXY: http://${PROXY_IP}:3128
       ALL_PROXY: http://${PROXY_IP}:3128
