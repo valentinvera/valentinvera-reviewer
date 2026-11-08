@@ -81,6 +81,9 @@ grep -q '^PORT=20566$' "$work/ok.plan" && fail "plan reused the retained b83c52 
 "$root/host-stage.sh" plan --inventory "$work/empty-inventory" --suffix 7fa384 --plan "$work/retained-7f.plan" --stage-dir "$work" >/dev/null 2>"$work/retained-7f.err" && fail "retained 7fa384 stage was planned"
 grep -q 'refusing retained stage' "$work/retained-7f.err" || fail "retained 7fa384 refusal missing"
 grep -q '^PORT=20332$' "$work/ok.plan" && fail "plan reused the retained 7fa384 port"
+"$root/host-stage.sh" plan --inventory "$work/empty-inventory" --suffix 4dc812 --plan "$work/retained-4d.plan" --stage-dir "$work" >/dev/null 2>"$work/retained-4d.err" && fail "retained 4dc812 stage was planned"
+grep -q 'refusing retained stage' "$work/retained-4d.err" || fail "retained 4dc812 refusal missing"
+grep -q '^PORT=20790$' "$work/ok.plan" && fail "plan reused the retained 4dc812 port"
 "$root/host-stage.sh" preflight --inventory "$work/empty-inventory" --plan "$work/ok.plan" >/dev/null
 "$root/host-stage.sh" preflight --inventory "$work/inventory" --plan "$work/ok.plan" >/dev/null 2>"$work/preflight.err" && fail "preflight replaced an existing bridge"
 grep -q 'refusing to replace' "$work/preflight.err" || fail "preflight did not refuse"
@@ -277,7 +280,7 @@ fi
 if grep -q 'proxy-false "https://api.github.com/' "$root/host-stage.sh"; then
   fail "direct fetch still depends on GitHub DNS"
 fi
-for label in sport8080-proof sport8080-relay direct-tcp-proxy443 dns-udp-127.0.0.11 host-local-443 udp-quic-443 private-10 metadata-link-local cgnat-tailscale-range ipv6 redirect proxy-down relay-egress; do
+for label in sport8080-proof sport8080-relay direct-tcp-proxy443 proxy-false-fixture dns-udp-127.0.0.11 dns-tcp-sink dns-udp-external dns-host-gateway host-local-443 udp-quic-443 private-10 metadata-link-local cgnat-tailscale-range ipv6-disabled redirect cold-neighbor post-rule-opencode proxy-down relay-egress; do
   grep -q "$label" "$root/host-stage.sh" || fail "missing case $label"
 done
 : > "$NFT_LOG"
@@ -323,7 +326,8 @@ printf '0\n' > "$work/delay/ms"
 : > "$work/fixture/srv.key"
 : > "$work/client/ca.crt"
 : > "$work/squid.conf"
-cp "$root/testdata/fixture.js" "$root/testdata/client.js" "$root/testdata/health.js" "$work/"
+cp "$root/testdata/fixture.js" "$root/testdata/client.js" "$root/testdata/health.js" "$root/testdata/dns-sink.js" "$work/"
+mkdir -p "$work/dns"
 cat > "$work/env" <<EOF
 EGRESS_PROJECT_NAME=vvrstabcdef
 EGRESS_IMAGE_TAG=sabcdef
@@ -357,6 +361,8 @@ TEST_DIR=$work
 FIXTURE_DIR=$work/fixture
 CLIENT_CA=$work/client/ca.crt
 FIXTURE_IP=172.30.144.10
+DNS_SINK_IP=172.30.143.9
+NEIGHBOR_IP=172.30.143.8
 IDLE_MS=310000
 EOF
 sudo docker compose --env-file "$work/env" -f "$root/compose.yml" -f "$root/compose.test.yml" config > "$work/render.yml"
@@ -396,6 +402,15 @@ assert "egress" not in client["networks"]
 assert "publish" not in client["networks"]
 assert "app" not in ingress["networks"]
 assert "egress" not in ingress["networks"]
+for name in ("app", "egress", "ingress", "publish"):
+    assert nets[name]["enable_ipv6"] is False, name
+assert client["dns"] == ["172.30.143.9"], client.get("dns")
+sink = cfg["services"]["dns"]
+assert sink["networks"]["app"]["ipv4_address"] == "172.30.143.9"
+assert sink["user"] == "10001:10001"
+assert "cap_add" not in sink
+assert sink["sysctls"]["net.ipv4.ip_unprivileged_port_start"] == "0"
+assert set(sink["networks"]) == {"app"}
 PY
 sed 's/^INGRESS_LISTEN_PORT=8080/INGRESS_LISTEN_PORT=3000/' "$work/env" > "$work/prod.env"
 sudo docker compose --profile app --env-file "$work/prod.env" -f "$root/compose.yml" config --format json > "$work/prod.json"
@@ -415,6 +430,7 @@ ports = ingress["ports"]
 assert ports[0]["host_ip"] == "127.0.0.1"
 assert int(ports[0]["target"]) == 3000
 assert set(ingress["networks"]) == {"ingress", "publish"}
+assert app["dns"] == ["127.0.0.1"], app.get("dns")
 PY
 
 echo "== ingress relay"
@@ -692,6 +708,55 @@ curl -fsS "http://127.0.0.1:${hold_port}/" | grep -q ok || {
 kill "$hold_pid" 2>/dev/null || true
 wait "$hold_pid" 2>/dev/null || true
 echo "listen port conflict is visible, and the same port can bind after release"
+
+echo "== route-ip waits until the socket is connected"
+bun -e '
+import dgram from "node:dgram"
+let threw = false
+for (let i = 0; i < 5 && !threw; i += 1) {
+  const sock = dgram.createSocket("udp4")
+  try {
+    sock.connect(9, "127.0.0.1")
+    sock.address()
+  } catch (error) {
+    threw = error.code === "EBADF"
+  }
+  sock.close()
+}
+process.exit(threw ? 0 : 2)
+' || fail "immediate getsockname did not fail with EBADF"
+route_ip=$(bun "$root/testdata/client.js" route-ip 127.0.0.1 9 | tr -d "[:space:]")
+[ "$route_ip" = "127.0.0.1" ] || fail "route-ip returned ${route_ip}"
+echo "route-ip returned 127.0.0.1 after connect"
+
+echo "== dns sink refuses arbitrary names"
+dns_port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+dns_log="$work/dns-queries"
+: > "$dns_log"
+DNS_PORT="$dns_port" DNS_LOG="$dns_log" CANARY_IP=192.0.2.55 bun "$root/testdata/dns-sink.js" >"$work/dns-sink.log" 2>&1 &
+dns_pid=$!
+n=0
+canary=""
+while [ "$n" -lt 50 ]; do
+  canary=$(bun "$root/testdata/client.js" dns-udp 127.0.0.1 canary.stage.test "$dns_port" 2>/dev/null || true)
+  printf '%s' "$canary" | grep -q 'ANSWER 192.0.2.55' && break
+  n=$((n + 1))
+  sleep 0.1
+done
+printf '%s' "$canary" | grep -q 'ANSWER 192.0.2.55' || {
+  kill "$dns_pid" 2>/dev/null || true
+  wait "$dns_pid" 2>/dev/null || true
+  fail "canary was not answered by the stage sink"
+}
+refused=$(bun "$root/testdata/client.js" dns-udp 127.0.0.1 example.com "$dns_port" 2>/dev/null || true)
+tcp_refused=$(bun "$root/testdata/client.js" dns-tcp 127.0.0.1 example.com "$dns_port" 2>/dev/null || true)
+kill "$dns_pid" 2>/dev/null || true
+wait "$dns_pid" 2>/dev/null || true
+printf '%s' "$refused" | grep -q 'NOANSWER rcode=5' || fail "udp example.com was not REFUSED: $refused"
+printf '%s' "$tcp_refused" | grep -q 'NOANSWER rcode=5' || fail "tcp example.com was not REFUSED: $tcp_refused"
+grep -F -q -x canary.stage.test "$dns_log" || fail "canary query was not logged"
+grep -F -q -x example.com "$dns_log" || fail "example.com query was not logged"
+echo "dns sink answered the canary and refused example.com"
 
 echo "static checks passed; live transport was not run"
 echo "work directory retained at $keep"

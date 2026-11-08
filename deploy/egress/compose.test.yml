@@ -53,7 +53,7 @@ services:
     mem_limit: 128m
     cpus: 0.25
     dns:
-      - 127.0.0.1
+      - ${DNS_SINK_IP:?set DNS_SINK_IP}
     environment:
       HOME: /tmp
       HEALTH_BIND: ${INGRESS_UPSTREAM_IP}
@@ -78,6 +78,57 @@ services:
         ipv4_address: ${INGRESS_UPSTREAM_IP:?set INGRESS_UPSTREAM_IP}
     depends_on:
       - proxy
+      - dns
+
+  dns:
+    image: oven/bun:1.4.4
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 64m
+    cpus: 0.25
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: "0"
+    environment:
+      HOME: /tmp
+      DNS_LOG: /log/queries
+      CANARY_IP: 192.0.2.55
+    volumes:
+      - ${TEST_DIR:?set TEST_DIR}/dns-sink.js:/opt/dns-sink.js:ro
+      - ${TEST_DIR}/dns:/log
+    tmpfs:
+      - /tmp:size=8m,mode=1777,noexec,nosuid,nodev
+    command: ["bun", "/opt/dns-sink.js"]
+    networks:
+      app:
+        ipv4_address: ${DNS_SINK_IP}
+    restart: "no"
+
+  neighbor:
+    profiles: ["oracle"]
+    image: oven/bun:1.4.4
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 64m
+    cpus: 0.25
+    environment:
+      HOME: /tmp
+    tmpfs:
+      - /tmp:size=8m,mode=1777,noexec,nosuid,nodev
+    command: ["bun", "-e", "setInterval(() => {}, 1000000)"]
+    networks:
+      app:
+        ipv4_address: ${NEIGHBOR_IP:?set NEIGHBOR_IP}
+    restart: "no"
 
   ingress:
     restart: "no"

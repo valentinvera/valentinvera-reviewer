@@ -66,7 +66,8 @@ reserved_value() {
     a41b73|sa41b73|vvrsta41b73|vvrsta41b73a|vvrsta41b73e|br-vvr-sa41b73a|br-vvr-sa41b73e|reviewer_egress_sa41b73|172.30.149.0/24|172.30.150.0/24|20831|\
     e7b421|se7b421|vvrste7b421|vvrste7b421a|vvrste7b421e|vvrste7b421i|vvrste7b421p|br-vvr-se7b421a|br-vvr-se7b421e|br-vvr-se7b421i|br-vvr-se7b421p|reviewer_egress_se7b421|172.30.167.0/24|172.30.168.0/24|172.30.169.0/24|172.30.170.0/24|20129|\
     b83c52|sb83c52|vvrstb83c52|vvrstb83c52a|vvrstb83c52e|vvrstb83c52i|vvrstb83c52p|br-vvr-sb83c52a|br-vvr-sb83c52e|br-vvr-sb83c52i|br-vvr-sb83c52p|reviewer_egress_sb83c52|172.30.154.0/24|172.30.155.0/24|172.30.156.0/24|172.30.157.0/24|20566|\
-    7fa384|s7fa384|vvrst7fa384|vvrst7fa384a|vvrst7fa384e|vvrst7fa384i|vvrst7fa384p|br-vvr-s7fa384a|br-vvr-s7fa384e|br-vvr-s7fa384i|br-vvr-s7fa384p|reviewer_egress_s7fa384|172.30.190.0/24|172.30.191.0/24|172.30.192.0/24|172.30.193.0/24|20332)
+    7fa384|s7fa384|vvrst7fa384|vvrst7fa384a|vvrst7fa384e|vvrst7fa384i|vvrst7fa384p|br-vvr-s7fa384a|br-vvr-s7fa384e|br-vvr-s7fa384i|br-vvr-s7fa384p|reviewer_egress_s7fa384|172.30.190.0/24|172.30.191.0/24|172.30.192.0/24|172.30.193.0/24|20332|\
+    4dc812|s4dc812|vvrst4dc812|vvrst4dc812a|vvrst4dc812e|vvrst4dc812i|vvrst4dc812p|br-vvr-s4dc812a|br-vvr-s4dc812e|br-vvr-s4dc812i|br-vvr-s4dc812p|reviewer_egress_s4dc812|172.30.198.0/24|172.30.199.0/24|172.30.200.0/24|172.30.201.0/24|20790)
       return 0
       ;;
   esac
@@ -441,9 +442,10 @@ run_stage() {
   choose_plan
   preflight_plan
   env_file="$stage_dir/env"
-  mkdir -p "$stage_dir/delay" "$stage_dir/fixture" "$stage_dir/client" "$stage_dir/empty"
+  mkdir -p "$stage_dir/delay" "$stage_dir/fixture" "$stage_dir/client" "$stage_dir/empty" "$stage_dir/dns"
+  chmod 1777 "$stage_dir/dns"
   printf '0\n' > "$stage_dir/delay/ms"
-  cp "$root/testdata/fixture.js" "$root/testdata/health.js" "$root/testdata/client.js" "$stage_dir/"
+  cp "$root/testdata/fixture.js" "$root/testdata/health.js" "$root/testdata/client.js" "$root/testdata/dns-sink.js" "$stage_dir/"
   cp "$root/allowlist" "$stage_dir/allowlist"
   cat >> "$stage_dir/allowlist" <<'EOF'
 metadata.test
@@ -474,7 +476,7 @@ EOF
     --fixture-name idle.fixture \
     --fixture-dst "$(plan_get FIXTURE_IP)/32" \
     > "$stage_dir/squid.conf"
-  chmod 0444 "$stage_dir/squid.conf" "$stage_dir/fixture.js" "$stage_dir/health.js" "$stage_dir/client.js"
+  chmod 0444 "$stage_dir/squid.conf" "$stage_dir/fixture.js" "$stage_dir/health.js" "$stage_dir/client.js" "$stage_dir/dns-sink.js"
   cat > "$env_file" <<EOF
 EGRESS_PROJECT_NAME=$(plan_get PROJECT)
 EGRESS_IMAGE_TAG=$(plan_get IMAGE_TAG)
@@ -508,6 +510,8 @@ TEST_DIR=$stage_dir
 FIXTURE_DIR=$stage_dir/fixture
 CLIENT_CA=$stage_dir/client/ca.crt
 FIXTURE_IP=$(plan_get FIXTURE_IP)
+DNS_SINK_IP=$(printf '%s\n' "$(plan_get APP_SUBNET)" | awk -F'[./]' '{ printf "%s.%s.%s.9\n", $1, $2, $3 }')
+NEIGHBOR_IP=$(printf '%s\n' "$(plan_get APP_SUBNET)" | awk -F'[./]' '{ printf "%s.%s.%s.8\n", $1, $2, $3 }')
 IDLE_MS=$((idle_seconds * 1000))
 EOF
   rendered=$(timeout 60 "$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" config)
@@ -517,11 +521,12 @@ EOF
     stage_fail "rendered compose adds a capability, the host network, or the docker socket"
   fi
   timeout 600 "$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" build proxy ingress
-  timeout 180 "$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" up -d proxy fixture client ingress
+  timeout 180 "$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" up -d proxy fixture client ingress dns
   client_id=$("$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" ps -q client)
   ingress_id=$("$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" ps -q ingress)
   proxy_id=$("$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" ps -q proxy)
   fixture_id=$("$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" ps -q fixture)
+  dns_id=$("$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" ps -q dns)
   tcp_ok=0
   publish_ok=0
   if timeout 8 "$docker_cmd" exec "$client_id" bun /opt/client.js direct "$(plan_get PROXY_IP)" 3128; then
@@ -556,6 +561,9 @@ EOF
   }
   err_detail() {
     tr '\n' ' ' < "$stage_dir/last.err" | awk '{ print substr($0, 1, 180) }'
+  }
+  out_detail() {
+    tr '\n' ' ' < "$stage_dir/last.out" | awk '{ print substr($0, 1, 180) }'
   }
   nft_bin=${EGRESS_NFT:-nft}
   nft_packets() {
@@ -645,12 +653,27 @@ EOF
   fi
   client_exec 25 https "https://api.github.com/" | grep -q '^200 ' || stage_fail "proxy path failed after nft"
   quiet_tunnel "quiet tunnel after nft"
-  app_ip=$(timeout 8 "$docker_cmd" exec "$client_id" bun /opt/client.js route-ip "$(plan_get PROXY_IP)" 3128 | tr -d '[:space:]') || app_ip=""
+  run_in "$client_id" 25 https "https://opencode.ai/"
+  if [ "$run_code" -eq 0 ]; then
+    record_case post-rule-opencode PASS "unauthenticated GET through the proxy $(out_detail)"
+  else
+    record_case post-rule-opencode FAIL "exit ${run_code} $(out_detail) $(err_detail)"
+  fi
+  run_in "$client_id" 8 route-ip "$(plan_get PROXY_IP)" 3128
+  app_ip=$(tr -d '[:space:]' < "$stage_dir/last.out")
+  case "$app_ip" in
+    *.*.*.*) ;;
+    *) app_ip="" ;;
+  esac
+  if [ -z "$app_ip" ]; then
+    record_case sport3128-allow FAIL "route-ip did not return an address $(err_detail)"
+  else
   run_in "$client_id" 8 bind "$(plan_get PROXY_IP)" 3128 3128 "$app_ip"
   if [ "$run_code" -eq 0 ] && grep -F -q "connected ${app_ip}:3128" "$stage_dir/last.out"; then
     record_case sport3128-allow PASS "handshake to the proxy on 3128 from ${app_ip}:3128"
   else
-    record_case sport3128-allow FAIL "exit ${run_code} $(err_detail)"
+    record_case sport3128-allow FAIL "exit ${run_code} $(out_detail) $(err_detail)"
+  fi
   fi
   sport3128_ok=0
   if grep -q '^sport3128-allow PASS ' "$case_file"; then
@@ -732,30 +755,65 @@ EOF
   else
     record_case direct-tcp-proxy443 NOT-EXERCISED "exit ${run_code} counter ${before}->${after} $(err_detail)"
   fi
-  run_in "$client_id" 8 direct "$(plan_get FIXTURE_IP)" 8443
-  if [ "$run_code" -eq 0 ]; then
-    record_case direct-tcp-fixture-ip ESCAPE "client reached the fixture ip without the proxy"
-  elif [ "$run_code" -eq 1 ]; then
-    record_case direct-tcp-fixture-ip NOT-EXERCISED "no handshake and no scoped counter; $(err_detail)"
+  client_pid=$("$docker_cmd" inspect "$client_id" --format '{{.State.Pid}}')
+  if ! nsenter -t "$client_pid" -n ip route replace "$(plan_get FIXTURE_IP)/32" via "$(plan_get PROXY_IP)"; then
+    record_case direct-tcp-fixture-ip NOT-EXERCISED "could not add the container route to the fixture address"
+    record_case proxy-false-fixture NOT-EXERCISED "could not add the container route to the fixture address"
   else
-    record_case direct-tcp-fixture-ip NOT-EXERCISED "exit ${run_code} $(err_detail)"
+    before=$(nft_packets bridge forward "meta ibrname \"$(plan_get APP_BRIDGE)\" ether type ip counter") || before=""
+    run_in "$client_id" 8 direct "$(plan_get FIXTURE_IP)" 8443
+    after=$(nft_packets bridge forward "meta ibrname \"$(plan_get APP_BRIDGE)\" ether type ip counter") || after=""
+    if [ "$run_code" -eq 0 ]; then
+      record_case direct-tcp-fixture-ip ESCAPE "client reached the fixture ip without the proxy $(err_detail)"
+    elif [ -n "$before" ] && [ -n "$after" ] && [ "$after" -gt "$before" ] && [ "$run_code" -eq 1 ]; then
+      record_case direct-tcp-fixture-ip PASS "numeric tcp to the fixture was dropped ${before} to ${after} $(err_detail)"
+    else
+      record_case direct-tcp-fixture-ip NOT-EXERCISED "exit ${run_code} counter ${before}->${after} $(err_detail)"
+    fi
+    run_in "$client_id" 20 https "https://idle.fixture:8443/"
+    if [ "$run_code" -ne 0 ] || ! grep -q '^200 ' "$stage_dir/last.out"; then
+      record_case proxy-false-fixture NOT-EXERCISED "proxied fixture TLS did not return 200 $(out_detail) $(err_detail)"
+    else
+      before=$(nft_packets bridge forward "meta ibrname \"$(plan_get APP_BRIDGE)\" ether type ip counter") || before=""
+      run_in "$client_id" 12 fetch-direct "https://$(plan_get FIXTURE_IP):8443/" idle.fixture
+      after=$(nft_packets bridge forward "meta ibrname \"$(plan_get APP_BRIDGE)\" ether type ip counter") || after=""
+      if [ "$run_code" -eq 0 ]; then
+        record_case proxy-false-fixture ESCAPE "proxy-disabled fetch reached the fixture $(out_detail)"
+      elif [ -n "$before" ] && [ -n "$after" ] && [ "$after" -gt "$before" ]; then
+        record_case proxy-false-fixture PASS "proxy disabled and the numeric TLS fetch was dropped ${before} to ${after} $(err_detail)"
+      else
+        record_case proxy-false-fixture NOT-EXERCISED "exit ${run_code} counter ${before}->${after} $(out_detail) $(err_detail)"
+      fi
+    fi
   fi
+  run_in "$client_id" 8 dns canary.stage.test
+  canary=$(tr -d '[:space:]' < "$stage_dir/last.out")
   run_in "$client_id" 8 dns example.com
-  if [ "$run_code" -eq 0 ] && grep -Eq '[0-9]' "$stage_dir/last.out"; then
-    record_case dns-system FAIL "system resolver returned $(tr -d '[:space:]' < "$stage_dir/last.out")"
-  elif [ "$run_code" -eq 124 ]; then
-    record_case dns-system NOT-EXERCISED "lookup did not finish"
+  if [ "$canary" = "192.0.2.55" ] && [ "$run_code" -ne 0 ] && grep -F -q -x canary.stage.test "$stage_dir/dns/queries" && grep -F -q -x example.com "$stage_dir/dns/queries"; then
+    record_case dns-system PASS "canary resolved only from the stage sink and example.com was refused there"
+  elif [ "$run_code" -eq 0 ]; then
+    record_case dns-system FAIL "system resolver returned an address for example.com $(out_detail)"
   else
-    record_case dns-system PASS "system resolver did not return an address"
+    record_case dns-system NOT-EXERCISED "canary ${canary} exit ${run_code} $(err_detail)"
   fi
   run_in "$client_id" 8 dns-udp 127.0.0.11 example.com
   dns_udp=$(tr -d '[:space:]' < "$stage_dir/last.out")
-  if [ "$run_code" -eq 0 ]; then
-    record_case dns-udp-127.0.0.11 FAIL "direct query answered ${dns_udp}"
-  elif printf '%s' "$dns_udp" | grep -q '^TIMEOUT\|^NOANSWER'; then
-    record_case dns-udp-127.0.0.11 PASS "direct query did not answer ${dns_udp}"
+  if printf '%s' "$dns_udp" | grep -q 'ANSWER'; then
+    record_case dns-udp-127.0.0.11 FAIL "stub returned an answer ${dns_udp}"
+  elif printf '%s' "$dns_udp" | grep -q 'NOANSWER rcode=5' && grep -F -q -x example.com "$stage_dir/dns/queries"; then
+    record_case dns-udp-127.0.0.11 PASS "stub forwarded example.com to the stage sink and got REFUSED"
   else
     record_case dns-udp-127.0.0.11 NOT-EXERCISED "exit ${run_code} ${dns_udp} $(err_detail)"
+  fi
+  sink_ip=$(awk -F= '/^DNS_SINK_IP=/{ print $2 }' "$env_file")
+  run_in "$client_id" 8 dns-tcp "$sink_ip" example.com 53
+  dns_tcp=$(tr -d '[:space:]' < "$stage_dir/last.out")
+  if printf '%s' "$dns_tcp" | grep -q 'ANSWER'; then
+    record_case dns-tcp-sink FAIL "direct tcp to the sink answered ${dns_tcp}"
+  elif printf '%s' "$dns_tcp" | grep -q 'NOANSWER rcode=5' && grep -F -q -x example.com "$stage_dir/dns/queries"; then
+    record_case dns-tcp-sink PASS "direct tcp/53 to the stage sink was REFUSED"
+  else
+    record_case dns-tcp-sink NOT-EXERCISED "exit ${run_code} ${dns_tcp} $(err_detail)"
   fi
   run_in "$fixture_id" 8 direct "$(plan_get FIXTURE_IP)" 8443
   if [ "$run_code" -ne 0 ]; then
@@ -797,23 +855,64 @@ EOF
       record_case "$name" NOT-EXERCISED "exit ${run_code} counter ${before}->${after} $(err_detail)"
     fi
   done
-  before=$(nft_packets bridge input "meta ibrname \"$(plan_get EGRESS_BRIDGE)\" ether type ip6 counter") || before=""
-  run_in "$fixture_id" 8 direct 2001:db8::1 443
-  after=$(nft_packets bridge input "meta ibrname \"$(plan_get EGRESS_BRIDGE)\" ether type ip6 counter") || after=""
-  if [ "$run_code" -eq 0 ]; then
-    record_case ipv6 ESCAPE "ipv6 tcp completed"
-  elif [ -n "$before" ] && [ -n "$after" ] && [ "$after" -gt "$before" ]; then
-    record_case ipv6 PASS "ipv6 drop counter moved ${before} to ${after}"
+  before=$(nft_packets bridge input "meta ibrname \"$(plan_get EGRESS_BRIDGE)\" ether type ip counter") || before=""
+  run_in "$fixture_id" 8 udp 192.0.2.1 53
+  after=$(nft_packets bridge input "meta ibrname \"$(plan_get EGRESS_BRIDGE)\" ether type ip counter") || after=""
+  udp_out=$(tr -d '[:space:]' < "$stage_dir/last.out")
+  if [ "$udp_out" = "reply" ] || [ "$run_code" -eq 0 ]; then
+    record_case dns-udp-external ESCAPE "udp/53 received a reply"
+  elif [ -n "$before" ] && [ -n "$after" ] && [ "$after" -gt "$before" ] && [ "$udp_out" = "none" ]; then
+    record_case dns-udp-external PASS "udp/53 to 192.0.2.1 was dropped ${before} to ${after}"
   else
-    record_case ipv6 NOT-EXERCISED "exit ${run_code} counter ${before}->${after}; a missing address is not a filter proof $(err_detail)"
+    record_case dns-udp-external NOT-EXERCISED "exit ${run_code} ${udp_out} counter ${before}->${after} $(err_detail)"
   fi
-  run_in "$client_id" 20 follow "https://idle.fixture:8443/redir"
+  before=$(nft_packets bridge input "meta ibrname \"$(plan_get EGRESS_BRIDGE)\" ether type ip counter") || before=""
+  run_in "$fixture_id" 8 direct 192.0.2.1 53
+  after=$(nft_packets bridge input "meta ibrname \"$(plan_get EGRESS_BRIDGE)\" ether type ip counter") || after=""
   if [ "$run_code" -eq 0 ]; then
-    record_case redirect ESCAPE "followed redirect returned success"
-  elif [ "$run_code" -eq 124 ]; then
-    record_case redirect NOT-EXERCISED "redirect check did not finish"
+    record_case dns-tcp-external ESCAPE "tcp/53 to 192.0.2.1 completed"
+  elif [ -n "$before" ] && [ -n "$after" ] && [ "$after" -gt "$before" ] && [ "$run_code" -eq 1 ]; then
+    record_case dns-tcp-external PASS "tcp/53 to 192.0.2.1 was dropped ${before} to ${after} $(err_detail)"
   else
-    record_case redirect PASS "redirect did not return success exit ${run_code}"
+    record_case dns-tcp-external NOT-EXERCISED "exit ${run_code} counter ${before}->${after} $(err_detail)"
+  fi
+  before=$(nft_packets bridge input "meta ibrname \"$(plan_get APP_BRIDGE)\" ether type ip counter") || before=""
+  run_in "$client_id" 8 udp "$(plan_get APP_GATEWAY)" 53
+  after=$(nft_packets bridge input "meta ibrname \"$(plan_get APP_BRIDGE)\" ether type ip counter") || after=""
+  udp_out=$(tr -d '[:space:]' < "$stage_dir/last.out")
+  if [ "$udp_out" = "reply" ] || [ "$run_code" -eq 0 ]; then
+    record_case dns-host-gateway ESCAPE "udp/53 to the app gateway received a reply"
+  elif [ -n "$before" ] && [ -n "$after" ] && [ "$after" -gt "$before" ] && [ "$udp_out" = "none" ]; then
+    record_case dns-host-gateway PASS "udp/53 toward the host gateway was dropped ${before} to ${after}"
+  else
+    record_case dns-host-gateway NOT-EXERCISED "exit ${run_code} ${udp_out} counter ${before}->${after} $(err_detail)"
+  fi
+  ipv6_on=0
+  for net in "$(plan_get APP_NETWORK)" "$(plan_get EGRESS_NETWORK)" "$(plan_get INGRESS_NETWORK)" "$(plan_get PUBLISH_NETWORK)"; do
+    enabled=$("$docker_cmd" network inspect "$net" --format '{{.EnableIPv6}}') || enabled=missing
+    if [ "$enabled" != "false" ]; then
+      ipv6_on=1
+    fi
+  done
+  for id in "$client_id" "$fixture_id" "$proxy_id" "$ingress_id" "$dns_id"; do
+    if "$docker_cmd" inspect "$id" --format '{{json .NetworkSettings.Networks}}' | grep -Eq '"GlobalIPv6Address":"[0-9a-fA-F:]'; then
+      ipv6_on=1
+    fi
+  done
+  if [ "$ipv6_on" -eq 0 ]; then
+    record_case ipv6-disabled PASS "stage networks and containers have IPv6 disabled; this is not a runtime filter proof"
+  else
+    record_case ipv6-disabled FAIL "a stage network or container has IPv6 enabled"
+  fi
+  run_in "$client_id" 15 https "https://idle.fixture:8443/redir"
+  redirect_status=$(awk '{ print $1; exit }' "$stage_dir/last.out")
+  run_in "$client_id" 15 https "https://blocked.fixture:8443/nope"
+  if [ "$redirect_status" = "302" ] && grep -q '^403 ' "$stage_dir/last.out"; then
+    record_case redirect PASS "fixture returned 302 and the proxy refused the new CONNECT with 403 $(out_detail)"
+  elif [ "$run_code" -eq 0 ]; then
+    record_case redirect ESCAPE "blocked fixture request succeeded $(out_detail)"
+  else
+    record_case redirect FAIL "redirect ${redirect_status} blocked $(out_detail) $(err_detail)"
   fi
   if ! timeout 60 "$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" stop proxy; then
     record_case proxy-down NOT-EXERCISED "proxy did not stop"
@@ -823,7 +922,7 @@ EOF
   if [ "$run_code" -eq 0 ]; then
     record_case proxy-down ESCAPE "github succeeded while the proxy was stopped"
   else
-    record_case proxy-down PASS "client fetch failed while the proxy was stopped exit ${run_code}"
+    record_case proxy-down PASS "no success within 15s exit ${run_code}; bounded observation, not an unlimited fail-closed proof"
   fi
   if ! timeout 60 "$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" start proxy; then
     record_case proxy-restored FAIL "proxy did not start"
@@ -860,7 +959,24 @@ EOF
   else
     record_case relay-egress NOT-EXERCISED "exit ${relay_code} counter ${before}->${after} $(err_detail)"
   fi
-  for name in sport3128-allow sport3128-proxy443 sport8080-proof sport8080-relay sport8080-gateway health-restored sport443-bind direct-tcp-proxy443 direct-tcp-fixture-ip dns-system dns-udp-127.0.0.11 host-local-443 udp-quic-443 private-10 metadata-link-local cgnat-tailscale-range ipv6 redirect proxy-down proxy-restored relay-egress; do
+  neighbor_ip=$(awk -F= '/^NEIGHBOR_IP=/{ print $2 }' "$env_file")
+  if ! timeout 90 "$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" --profile oracle up -d neighbor; then
+    record_case cold-neighbor NOT-EXERCISED "neighbor container did not start"
+  else
+    before=$(nft_packets bridge forward "meta ibrname \"$(plan_get APP_BRIDGE)\" ether type ip counter") || before=""
+    flags_before=$("$docker_cmd" exec "$client_id" cat /proc/net/arp | awk -v ip="$neighbor_ip" '$1 == ip { print $3 }')
+    run_in "$client_id" 8 direct "$neighbor_ip" 443
+    after=$(nft_packets bridge forward "meta ibrname \"$(plan_get APP_BRIDGE)\" ether type ip counter") || after=""
+    flags_after=$("$docker_cmd" exec "$client_id" cat /proc/net/arp | awk -v ip="$neighbor_ip" '$1 == ip { print $3 }')
+    if [ "$run_code" -eq 0 ]; then
+      record_case cold-neighbor ESCAPE "new neighbor accepted tcp/443"
+    elif [ -z "$flags_before" ] && [ -n "$flags_after" ] && [ "$flags_after" != "0x0" ] && [ -n "$before" ] && [ -n "$after" ] && [ "$after" -gt "$before" ] && [ "$run_code" -eq 1 ]; then
+      record_case cold-neighbor PASS "new ARP ${flags_after} and the app bridge drop moved ${before} to ${after}"
+    else
+      record_case cold-neighbor NOT-EXERCISED "arp ${flags_before}->${flags_after} exit ${run_code} counter ${before}->${after} $(err_detail)"
+    fi
+  fi
+  for name in sport3128-allow sport3128-proxy443 sport8080-proof sport8080-relay sport8080-gateway health-restored sport443-bind direct-tcp-proxy443 direct-tcp-fixture-ip proxy-false-fixture post-rule-opencode dns-system dns-udp-127.0.0.11 dns-tcp-sink dns-udp-external dns-tcp-external dns-host-gateway host-local-443 udp-quic-443 private-10 metadata-link-local cgnat-tailscale-range ipv6-disabled redirect cold-neighbor proxy-down proxy-restored relay-egress; do
     if ! grep -q "^${name} " "$case_file"; then
       record_case "$name" NOT-EXERCISED "case was not recorded"
     fi

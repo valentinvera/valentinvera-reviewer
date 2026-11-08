@@ -44,6 +44,8 @@ services:
     pids_limit: 256
     mem_limit: 512m
     cpus: 1
+    # Docker's embedded stub forwards only to this address. Nothing listens on it.
+    # The staging client uses one logging resolver instead, so that forward can be observed.
     dns:
       - 127.0.0.1
     environment:

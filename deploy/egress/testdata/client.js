@@ -20,6 +20,62 @@ function bindFailure(error) {
   process.exit(1)
 }
 
+function dnsQuery(name) {
+  const labels = name
+    .split(".")
+    .filter(Boolean)
+    .map((part) => Buffer.concat([Buffer.from([part.length]), Buffer.from(part)]))
+  const header = Buffer.alloc(12)
+  header.writeUInt16BE(0x4242, 0)
+  header.writeUInt16BE(0x0100, 2)
+  header.writeUInt16BE(1, 4)
+  return Buffer.concat([header, ...labels, Buffer.from([0, 0, 1, 0, 1])])
+}
+
+function firstA(msg) {
+  let offset = 12
+  const questions = msg.readUInt16BE(4)
+  const answers = msg.readUInt16BE(6)
+  for (let i = 0; i < questions; i += 1) {
+    while (offset < msg.length) {
+      const len = msg[offset]
+      if ((len & 0xc0) === 0xc0) {
+        offset += 2
+        break
+      }
+      if (len === 0) {
+        offset += 1
+        break
+      }
+      offset += 1 + len
+    }
+    offset += 4
+  }
+  for (let i = 0; i < answers && offset + 12 <= msg.length; i += 1) {
+    if ((msg[offset] & 0xc0) === 0xc0) offset += 2
+    else {
+      while (offset < msg.length && msg[offset] !== 0) offset += 1 + msg[offset]
+      offset += 1
+    }
+    const type = msg.readUInt16BE(offset)
+    const rdlen = msg.readUInt16BE(offset + 8)
+    if (type === 1 && rdlen === 4) {
+      const start = offset + 10
+      return `${msg[start]}.${msg[start + 1]}.${msg[start + 2]}.${msg[start + 3]}`
+    }
+    offset += 10 + rdlen
+  }
+  return ""
+}
+
+function describeDns(msg) {
+  if (!msg || msg.length < 12) return "SHORT"
+  const rcode = msg.readUInt16BE(2) & 0xf
+  const answers = msg.readUInt16BE(6)
+  if (answers > 0) return `ANSWER ${firstA(msg)} rcode=${rcode}`
+  return `NOANSWER rcode=${rcode}`
+}
+
 if (mode === "https") {
   const response = await fetch(target, {
     redirect: "manual",
@@ -29,10 +85,17 @@ if (mode === "https") {
 }
 
 if (mode === "follow") {
-  const response = await fetch(target, {
-    signal: AbortSignal.timeout(15_000),
-  })
-  await finish(response)
+  try {
+    const response = await fetch(target, {
+      signal: AbortSignal.timeout(15_000),
+    })
+    await finish(response)
+  } catch (error) {
+    process.stderr.write(
+      `follow-error ${(error && error.code) || "UNKNOWN"} ${(error && error.message) || error}\n`,
+    )
+    process.exit(1)
+  }
 }
 
 if (mode === "idle") {
@@ -64,11 +127,15 @@ if (mode === "direct") {
         data() {},
         close() {},
         error(error) {
-          process.stderr.write(`connect-error ${(error && error.code) || "UNKNOWN"}\n`)
+          process.stderr.write(
+            `connect-error ${(error && error.code) || "UNKNOWN"} ${(error && error.message) || ""}\n`,
+          )
           process.exit(1)
         },
         connectError(error) {
-          process.stderr.write(`connect-error ${(error && error.code) || "UNKNOWN"}\n`)
+          process.stderr.write(
+            `connect-error ${(error && error.code) || "UNKNOWN"} ${(error && error.message) || ""}\n`,
+          )
           process.exit(1)
         },
       },
@@ -80,47 +147,75 @@ if (mode === "direct") {
 }
 
 if (mode === "dns") {
-  const result = await Bun.dns.lookup(target)
-  process.stdout.write(`${result[0]?.address ?? ""}\n`)
-  process.exit(0)
+  try {
+    const result = await Bun.dns.lookup(target)
+    process.stdout.write(`${result[0]?.address ?? ""}\n`)
+    process.exit(0)
+  } catch (error) {
+    process.stderr.write(
+      `dns-error ${(error && error.code) || "UNKNOWN"} ${(error && error.message) || error}\n`,
+    )
+    process.exit(1)
+  }
 }
 
 if (mode === "dns-udp") {
   const name = Bun.argv[4]
-  const labels = name
-    .split(".")
-    .filter(Boolean)
-    .map((part) => Buffer.concat([Buffer.from([part.length]), Buffer.from(part)]))
-  const header = Buffer.alloc(12)
-  header.writeUInt16BE(0x4242, 0)
-  header.writeUInt16BE(0x0100, 2)
-  header.writeUInt16BE(1, 4)
-  const packet = Buffer.concat([header, ...labels, Buffer.from([0, 0, 1, 0, 1])])
+  const port = Number(Bun.argv[5] ?? "53")
+  const packet = dnsQuery(name)
   const sock = dgram.createSocket("udp4")
   const result = await new Promise((resolve) => {
     const timer = setTimeout(() => resolve("TIMEOUT"), 2000)
     sock.once("error", (error) => {
       clearTimeout(timer)
-      resolve(`ERROR ${(error && error.code) || "UNKNOWN"}`)
+      resolve(`ERROR ${(error && error.code) || "UNKNOWN"} ${(error && error.message) || ""}`)
     })
     sock.once("message", (msg) => {
       clearTimeout(timer)
-      if (msg.length < 12) {
-        resolve("SHORT")
-        return
-      }
-      const rcode = msg.readUInt16BE(2) & 0xf
-      const answers = msg.readUInt16BE(6)
-      resolve(answers > 0 ? `ANSWER rcode=${rcode} ancount=${answers}` : `NOANSWER rcode=${rcode}`)
+      resolve(describeDns(msg))
     })
-    sock.send(packet, 53, target, (error) => {
+    sock.send(packet, port, target, (error) => {
       if (error) {
         clearTimeout(timer)
-        resolve(`ERROR ${(error && error.code) || "UNKNOWN"}`)
+        resolve(`ERROR ${(error && error.code) || "UNKNOWN"} ${(error && error.message) || ""}`)
       }
     })
   })
   sock.close()
+  process.stdout.write(`${result}\n`)
+  process.exit(result.startsWith("ANSWER") ? 0 : 1)
+}
+
+if (mode === "dns-tcp") {
+  const name = Bun.argv[4]
+  const port = Number(Bun.argv[5] ?? "53")
+  const packet = dnsQuery(name)
+  const framed = Buffer.alloc(2 + packet.length)
+  framed.writeUInt16BE(packet.length, 0)
+  packet.copy(framed, 2)
+  const result = await new Promise((resolve) => {
+    const socket = net.connect({ host: target, port })
+    const chunks = []
+    const timer = setTimeout(() => {
+      socket.destroy()
+      resolve("TIMEOUT")
+    }, 3000)
+    socket.once("error", (error) => {
+      clearTimeout(timer)
+      resolve(`ERROR ${(error && error.code) || "UNKNOWN"} ${(error && error.message) || ""}`)
+    })
+    socket.on("data", (chunk) => {
+      chunks.push(chunk)
+      const buf = Buffer.concat(chunks)
+      if (buf.length < 2) return
+      const length = buf.readUInt16BE(0)
+      if (buf.length < 2 + length) return
+      clearTimeout(timer)
+      socket.end()
+      resolve(describeDns(buf.subarray(2, 2 + length)))
+    })
+    socket.once("connect", () => socket.write(framed))
+  })
   process.stdout.write(`${result}\n`)
   process.exit(result.startsWith("ANSWER") ? 0 : 1)
 }
@@ -152,10 +247,35 @@ if (mode === "udp") {
 
 if (mode === "route-ip") {
   const sock = dgram.createSocket("udp4")
-  sock.connect(Number(Bun.argv[4] ?? "9"), target)
-  process.stdout.write(`${sock.address().address}\n`)
-  sock.close()
-  process.exit(0)
+  try {
+    const address = await new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(Object.assign(new Error("TIMEOUT"), { code: "TIMEOUT" })),
+        2000,
+      )
+      sock.once("error", (error) => {
+        clearTimeout(timer)
+        reject(error)
+      })
+      sock.connect(Number(Bun.argv[4] ?? "9"), target, () => {
+        clearTimeout(timer)
+        try {
+          resolve(sock.address().address)
+        } catch (error) {
+          reject(error)
+        }
+      })
+    })
+    process.stdout.write(`${address}\n`)
+    sock.close()
+    process.exit(0)
+  } catch (error) {
+    process.stderr.write(
+      `route-error ${(error && error.code) || "UNKNOWN"} ${(error && error.message) || error}\n`,
+    )
+    sock.close()
+    process.exit(1)
+  }
 }
 
 if (mode === "bind") {
@@ -224,6 +344,24 @@ if (mode === "bind-proof") {
       bindFailure(error)
     })
   })
+}
+
+if (mode === "fetch-direct") {
+  const serverName = Bun.argv[4]
+  try {
+    const response = await fetch(target, {
+      proxy: false,
+      redirect: "manual",
+      signal: AbortSignal.timeout(8000),
+      tls: serverName ? { serverName } : undefined,
+    })
+    await finish(response)
+  } catch (error) {
+    process.stderr.write(
+      `fetch-error ${(error && error.code) || "UNKNOWN"} ${(error && error.message) || error}\n`,
+    )
+    process.exit(1)
+  }
 }
 
 if (mode === "proxy-false") {

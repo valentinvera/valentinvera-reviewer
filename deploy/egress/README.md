@@ -138,7 +138,7 @@ sudo deploy/egress/host-stage.sh run --stage-dir /var/tmp/vvr-stage-manual
 Use an empty stage directory. The harness allocates a project `vvrst` plus six
 hex digits, bridges `br-vvr-s<suffix>a`, `e`, `i` and `p`, four free
 `172.30.0.0/16` /24s outside the examples above, and a loopback port in
-20000-20899. It will not reuse the retained `a41b73`, `e7b421`, `b83c52`, or `7fa384` stages. It renders Compose
+20000-20899. It will not reuse the retained `a41b73`, `e7b421`, `b83c52`, `7fa384`, or `4dc812` stages. It renders Compose
 and refuses the result if the app network is
 not internal or if a capability, the host network, or the Docker socket
 appears. It does not mount production data, backups, or secrets.
@@ -171,15 +171,36 @@ success while any required case is failed or not exercised.
 
 The source-port checks bind port 3128 on the address the client uses toward the
 proxy, and port 8080 on the ingress address the health listener uses. The
-health listener is asked to release that port and is restored afterward;
-loopback health has to answer again. A refusal from a closed port is not
-enough: source port 8080 must first complete a handshake to a listener on that
-same address. Direct TCP uses numeric addresses. A DNS failure is a separate
-case and is not a TCP deny. Host-local port 443 is a connection from the
-fixture to the egress gateway, and it counts only when the inet INPUT drop
-increases. UDP/443, the bogon ranges used for private, link-local, and
-Tailscale CGNAT addresses, IPv6, the fixture redirect, a stopped proxy, and
-relay egress are separate rows. A counter that does not move is not exercised.
+address is read only after the datagram socket finishes connecting. The health
+listener is asked to release port 8080 and is restored afterward; loopback
+health has to answer again. Source port 8080 must first complete a handshake
+to a listener on that same address. A route inside the client namespace sends
+the fixture address to the proxy MAC so the numeric TCP and the
+`proxy: false` TLS fetch are real packets. They count only when the app-bridge
+drop moves. The proxied fixture request has to return 200 first, with the
+fixture name as SNI on the direct attempt. DNS failure is a separate case.
+
+The production app's only configured stub forwarder is `127.0.0.1`. The stage
+client's only forwarder is a resolver on the app network. That resolver
+answers `canary.stage.test` and refuses every other name, and it records the
+question. A SERVFAIL with no record is not a pass. UDP and TCP port 53 toward
+`192.0.2.1`, and UDP port 53 toward the app gateway, are separate drop checks.
+The proxy keeps the host resolver so the allowed HTTPS names still resolve.
+The host resolver is not changed.
+
+IPv6 is checked by inspecting the four stage networks and their containers. A
+pass means IPv6 is disabled. It is not a runtime filter proof. The redirect
+case keeps the 302 and the proxy 403. OpenCode is requested again after the
+rules. A new stage container is the cold neighbor: its ARP entry must be
+absent, then present, and the TCP attempt must hit the drop counter. No host
+or production neighbor table is flushed. Stopping the proxy is a 15 second
+observation, and the allowed GitHub path has to work again after it starts.
+
+These rows are not a production deployment. They do not prove boot, deploy, or
+startup before the tables exist. The Squid and socat images are not scanned.
+An allowed API request can still carry data out. A counter that does not move
+is not exercised, and any case that is not `PASS` makes the harness exit
+nonzero.
 
 Docker programs a published port on the container's default-gateway network.
 An internal-only container has no gateway, so Docker 29.9.2 accepted the
