@@ -40,13 +40,33 @@ show that the network controls work.
   not log URL paths.
 - `read_timeout` is 35 minutes. The deployed model deadline is 10 minutes when
   `AI_TIMEOUT_MS` is unset, and the application cap is 30 minutes.
-- The host table `inet reviewer_egress` accepts established replies from the
-  app bridge, allows a new connection only to the proxy on port 3128, then
-  drops other new traffic from that bridge. From the egress bridge it drops
-  IPv6, bogons and anything that is not TCP 443.
+- `internal: true` removes the default route. It does not stop a packet on
+  that bridge from reaching the host gateway, a link-local address, or another
+  container on the same bridge. Those paths are covered only after the scoped
+  nft tables are installed. The tables are `inet` and `bridge`, both named for
+  the stage, at priority -150, which is before the priority-0 filter chains
+  Docker and Tailscale use. There is no OUTPUT chain and no flush. Traffic
+  that does not arrive on one of the four stage bridges is left to the later
+  chains.
+
+| Bridge  | To the host                                                           | New flow that stays allowed                                     | Reply                                                                      | Everything else on that bridge                             |
+| ------- | --------------------------------------------------------------------- | --------------------------------------------------------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| App     | IPv6 dropped; established IPv4 kept; other IPv4 dropped               | TCP to the proxy on port 3128                                   | established, and a same-bridge reply from the proxy's source port 3128     | dropped, including IPv6                                    |
+| Ingress | IPv4 and IPv6 dropped, including an established session from the host | TCP from the relay `.2` to the app `.10` on the one listen port | established, and a same-bridge reply whose source port is that listen port | dropped, including a new session from the app to the relay |
+| Publish | IPv6 dropped; established IPv4 kept; other new IPv4 dropped           | none                                                            | established, and a same-bridge packet whose source port is the listen port | dropped, including IPv6                                    |
+| Egress  | IPv6 dropped; established IPv4 kept; other IPv4 dropped               | TCP port 443 after the bogon drop                               | established, and a same-bridge reply from source port 443                  | dropped, including IPv6                                    |
+
+The previous static check grepped the publish-bridge drop and the
+`--ingress-network` rollback filter. It did not require the ingress bridge to
+appear in the rendered rules, so the second app interface was uncovered. The
+check now parses the ruleset.
 
 ## Limits that remain
 
+- These rules are absent until `install` succeeds. A reboot removes them.
+  The harness does not install or enable the systemd unit. Starting the app
+  before the rules exist is not fail-closed, and that boot path has not been
+  tested. This is not a production-ready control.
 - A request that is allowed to `api.github.com` or `opencode.ai` can still send
   data to those APIs. This filter does not read the review body.
 - `opencode.ai` is behind Cloudflare. A CONNECT proxy that does not decrypt TLS
@@ -173,10 +193,14 @@ running app until its queue has been drained on purpose.
    ```sh
    sudo valentinvera-reviewer-egress install \
      --app-bridge br-vvr-app --egress-bridge br-vvr-egress \
-     --publish-bridge br-vvr-publish
+     --ingress-bridge br-vvr-ingress --publish-bridge br-vvr-publish \
+     --ingress-relay 172.30.219.2 --ingress-upstream 172.30.219.10 \
+     --ingress-port 3000
    sudo valentinvera-reviewer-egress status \
      --app-bridge br-vvr-app --egress-bridge br-vvr-egress \
-     --publish-bridge br-vvr-publish
+     --ingress-bridge br-vvr-ingress --publish-bridge br-vvr-publish \
+     --ingress-relay 172.30.219.2 --ingress-upstream 172.30.219.10 \
+     --ingress-port 3000
    ```
 
 6. Recreate the app with `deploy/egress/compose.yml` and

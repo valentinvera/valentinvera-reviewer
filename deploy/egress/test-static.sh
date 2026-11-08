@@ -118,57 +118,96 @@ export EGRESS_IP="$work/bin/ip"
 export EGRESS_DOCKER="$work/bin/docker"
 export EGRESS_LOCK_DIR="$work/lock"
 : > "$NFT_LOG"
+rules_args="--table reviewer_egress_sabcdef --app-bridge br-vvr-sabcdefa --egress-bridge br-vvr-sabcdefe --ingress-bridge br-vvr-sabcdefi --publish-bridge br-vvr-sabcdefp --proxy-ip 172.30.143.2 --ingress-relay 172.30.145.2 --ingress-upstream 172.30.145.10 --ingress-port 8080 --app-network vvrstabcdefa --egress-network vvrstabcdefe --ingress-network vvrstabcdefi --publish-network vvrstabcdefp"
+# shellcheck disable=SC2086
+"$root/host-rules.sh" install $rules_args >/dev/null
+if grep -q 'delete table' "$NFT_LOG"; then
+  fail "install deleted an nft table"
+fi
+grep -q '^-f ' "$NFT_LOG" || fail "install did not load rules"
+python3 - "$NFT_LOG" <<'PY' || fail "rendered rules do not cover the ingress bridge"
+import sys
+text = open(sys.argv[1]).read()
+start = text.find("table inet ")
+if start < 0:
+    raise SystemExit("no inet table")
+rules = text[start:]
+if "hook output" in rules or "flush" in rules:
+    raise SystemExit("rules touch output or flush")
+if rules.count("policy accept") < 4:
+    raise SystemExit("a chain is not policy accept")
+ingress = "br-vvr-sabcdefi"
+required = [
+    f'iifname "{ingress}" meta nfproto ipv6 counter drop',
+    f'iifname "{ingress}" ct state established,related counter accept',
+    'iifname "{0}" ip saddr 172.30.145.2 ip daddr 172.30.145.10 tcp dport 8080 ct state new counter accept'.format(ingress),
+    f'iifname "{ingress}" counter drop',
+    f'meta ibrname "{ingress}" ether type ip6 counter drop',
+    f'meta ibrname "{ingress}" ether type ip ip saddr 172.30.145.2 ip daddr 172.30.145.10 tcp dport 8080 counter accept',
+    f'meta ibrname "{ingress}" ether type ip ip saddr 172.30.145.10 tcp sport 8080 ip daddr 172.30.145.2 counter accept',
+    f'meta ibrname "{ingress}" ether type ip counter drop',
+    'iifname "br-vvr-sabcdefa" ip daddr 172.30.143.2 tcp dport 3128 counter accept',
+    'iifname "br-vvr-sabcdefp" counter drop',
+    "table bridge reviewer_egress_sabcdef",
+]
+for line in required:
+    if line not in rules:
+        raise SystemExit("missing: " + line)
+# The app must not be given a new session to the relay. A reply keeps source port 8080.
+forbidden = 'ip saddr 172.30.145.10 ip daddr 172.30.145.2 tcp dport 8080'
+if forbidden in rules:
+    raise SystemExit("app to relay new session is accepted")
+if 'iifname "br-vvr-sabcdefp" tcp dport' in rules:
+    raise SystemExit("publish bridge allows a new destination")
+# Ingress input drops before any accept of that interface in the input chain.
+input_chain = rules.split("chain forward", 1)[0]
+input_lines = [line.strip() for line in input_chain.splitlines() if ingress in line and "counter" in line]
+if not input_lines or any("accept" in line for line in input_lines):
+    raise SystemExit("ingress input accepts traffic: " + repr(input_lines))
+if not any(line.endswith("counter drop") for line in input_lines):
+    raise SystemExit("ingress input has no drop")
+forward = rules.split("chain forward", 1)[1].split("table bridge", 1)[0]
+established = forward.find('iifname "%s" ct state established,related counter accept' % ingress)
+allowed = forward.find("tcp dport 8080 ct state new counter accept")
+dropped = forward.rfind('iifname "%s" counter drop' % ingress)
+if not (0 <= established < allowed < dropped):
+    raise SystemExit("ingress forward does not drop after the one allowed flow")
+PY
+: > "$NFT_LOG"
 "$root/host-rules.sh" install \
   --table reviewer_egress_sabcdef \
   --app-bridge br-vvr-sabcdefa \
   --egress-bridge br-vvr-sabcdefe \
   --publish-bridge br-vvr-sabcdefp \
   --proxy-ip 172.30.143.2 \
-  --app-network vvrstabcdefa \
-  --egress-network vvrstabcdefe \
-  --ingress-network vvrstabcdefi \
-  --publish-network vvrstabcdefp >/dev/null
-if grep -q 'delete table' "$NFT_LOG"; then
-  fail "install deleted an nft table"
+  --ingress-relay 172.30.145.2 \
+  --ingress-upstream 172.30.145.10 \
+  --ingress-port 8080 >/dev/null 2>"$work/missing-ingress.err" && fail "install without the ingress bridge was accepted"
+grep -q 'ingress bridge, publish bridge, relay, upstream, and port are required' "$work/missing-ingress.err" || fail "missing ingress bridge was not refused"
+if grep -q '^-f ' "$NFT_LOG"; then
+  fail "missing ingress bridge still rendered nft"
 fi
-grep -q '^-f ' "$NFT_LOG" || fail "install did not load rules"
-grep -q 'iifname "br-vvr-sabcdefp" counter drop' "$NFT_LOG" || fail "publish bridge is not denied"
-grep -q 'iifname "br-vvr-sabcdefp" tcp dport' "$NFT_LOG" && fail "publish bridge allows a new destination"
 touch "$NFT_EXISTS"
 : > "$NFT_LOG"
-"$root/host-rules.sh" install \
-  --table reviewer_egress_sabcdef \
-  --app-bridge br-vvr-sabcdefa \
-  --egress-bridge br-vvr-sabcdefe \
-  --proxy-ip 172.30.143.2 >/dev/null 2>"$work/replace.err" && fail "second install replaced the table"
+# shellcheck disable=SC2086
+"$root/host-rules.sh" install $rules_args >/dev/null 2>"$work/replace.err" && fail "second install replaced the table"
 grep -q 'refusing to replace' "$work/replace.err" || fail "replace refusal missing"
 if grep -q 'delete table' "$NFT_LOG"; then
   fail "refused install still deleted the table"
 fi
-"$root/host-rules.sh" rollback \
-  --table reviewer_egress_sabcdef \
-  --app-bridge br-vvr-sabcdefa \
-  --egress-bridge br-vvr-sabcdefe \
-  --proxy-ip 172.30.143.2 >/dev/null 2>"$work/rollback.err" && fail "rollback ran without confirmation"
+# shellcheck disable=SC2086
+"$root/host-rules.sh" rollback $rules_args >/dev/null 2>"$work/rollback.err" && fail "rollback ran without confirmation"
 printf '%s\n' 'fixture vvrstabcdefa' > "$DOCKER_PS"
-"$root/host-rules.sh" rollback --confirm-stopped \
-  --table reviewer_egress_sabcdef \
-  --app-bridge br-vvr-sabcdefa \
-  --egress-bridge br-vvr-sabcdefe \
-  --proxy-ip 172.30.143.2 \
-  --app-network vvrstabcdefa \
-  --egress-network vvrstabcdefe >/dev/null 2>"$work/running.err" && fail "rollback removed rules while a container was running"
+# shellcheck disable=SC2086
+"$root/host-rules.sh" rollback --confirm-stopped $rules_args >/dev/null 2>"$work/running.err" && fail "rollback removed rules while a container was running"
 grep -q 'refusing rollback while staged containers are running' "$work/running.err" || fail "running-container refusal missing"
 : > "$NFT_LOG"
 : > "$DOCKER_PS"
-"$root/host-rules.sh" rollback --confirm-stopped \
-  --table reviewer_egress_sabcdef \
-  --app-bridge br-vvr-sabcdefa \
-  --egress-bridge br-vvr-sabcdefe \
-  --proxy-ip 172.30.143.2 \
-  --app-network vvrstabcdefa \
-  --egress-network vvrstabcdefe >/dev/null
-grep -q '^delete table inet reviewer_egress_sabcdef$' "$NFT_LOG" || fail "explicit rollback did not name only its table"
+# shellcheck disable=SC2086
+"$root/host-rules.sh" rollback --confirm-stopped $rules_args >/dev/null
+grep -q '^delete table inet reviewer_egress_sabcdef$' "$NFT_LOG" || fail "explicit rollback did not delete the inet table"
+grep -q '^delete table bridge reviewer_egress_sabcdef$' "$NFT_LOG" || fail "explicit rollback did not delete the bridge table"
+[ "$(grep -c '^delete table ' "$NFT_LOG")" -eq 2 ] || fail "rollback deleted something other than its two tables"
 
 echo "== compose render"
 mkdir -p "$work/empty" "$work/fixture" "$work/client" "$work/delay"

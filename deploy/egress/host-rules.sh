@@ -10,6 +10,10 @@ app_bridge="br-vvr-app"
 egress_bridge="br-vvr-egress"
 proxy_ip="172.30.208.2"
 publish_bridge=""
+ingress_bridge=""
+ingress_relay=""
+ingress_upstream=""
+ingress_port=""
 app_network=""
 egress_network=""
 ingress_network=""
@@ -22,7 +26,7 @@ docker_cmd="${EGRESS_DOCKER:-docker}"
 lock_dir="${EGRESS_LOCK_DIR:-/run/lock}"
 
 usage() {
-  echo "usage: host-rules.sh {install|status|rollback} [--table NAME] [--app-bridge IF] [--egress-bridge IF] [--publish-bridge IF] [--proxy-ip ADDR] [--app-network NAME] [--egress-network NAME] [--ingress-network NAME] [--publish-network NAME] [--if-bridges-present] [--confirm-stopped]" >&2
+  echo "usage: host-rules.sh {install|status|rollback} [--table NAME] [--app-bridge IF] [--egress-bridge IF] [--ingress-bridge IF] [--publish-bridge IF] [--proxy-ip ADDR] [--ingress-relay ADDR] [--ingress-upstream ADDR] [--ingress-port PORT] [--app-network NAME] [--egress-network NAME] [--ingress-network NAME] [--publish-network NAME] [--if-bridges-present] [--confirm-stopped]" >&2
   exit 1
 }
 
@@ -33,6 +37,10 @@ while [ $# -gt 0 ]; do
     --app-bridge) app_bridge="$2"; shift 2 ;;
     --egress-bridge) egress_bridge="$2"; shift 2 ;;
     --publish-bridge) publish_bridge="$2"; shift 2 ;;
+    --ingress-bridge) ingress_bridge="$2"; shift 2 ;;
+    --ingress-relay) ingress_relay="$2"; shift 2 ;;
+    --ingress-upstream) ingress_upstream="$2"; shift 2 ;;
+    --ingress-port) ingress_port="$2"; shift 2 ;;
     --proxy-ip) proxy_ip="$2"; shift 2 ;;
     --app-network) app_network="$2"; shift 2 ;;
     --egress-network) egress_network="$2"; shift 2 ;;
@@ -78,22 +86,58 @@ case "$egress_bridge" in
     ;;
 esac
 
-if [ "$app_bridge" = "$egress_bridge" ] || { [ -n "$publish_bridge" ] && { [ "$publish_bridge" = "$app_bridge" ] || [ "$publish_bridge" = "$egress_bridge" ]; }; }; then
-  echo "app and egress bridges must differ" >&2
+if [ -z "$ingress_bridge" ] || [ -z "$publish_bridge" ] || [ -z "$ingress_relay" ] || [ -z "$ingress_upstream" ] || [ -z "$ingress_port" ]; then
+  echo "ingress bridge, publish bridge, relay, upstream, and port are required" >&2
   exit 1
 fi
 
-if [ -n "$publish_bridge" ]; then
-  case "$publish_bridge" in
-    br-vvr-publish) ;;
-    *)
-      stage_name "$publish_bridge" '^br-vvr-s[0-9a-f]{6}p$' || {
-        echo "refusing unexpected publish bridge $publish_bridge" >&2
-        exit 1
-      }
-      ;;
-  esac
+if [ "$app_bridge" = "$egress_bridge" ] || [ "$ingress_bridge" = "$app_bridge" ] || [ "$ingress_bridge" = "$egress_bridge" ] || [ "$publish_bridge" = "$app_bridge" ] || [ "$publish_bridge" = "$egress_bridge" ] || [ "$publish_bridge" = "$ingress_bridge" ]; then
+  echo "app, ingress, egress, and publish bridges must differ" >&2
+  exit 1
 fi
+
+case "$publish_bridge" in
+  br-vvr-publish) ;;
+  *)
+    stage_name "$publish_bridge" '^br-vvr-s[0-9a-f]{6}p$' || {
+      echo "refusing unexpected publish bridge $publish_bridge" >&2
+      exit 1
+    }
+    ;;
+esac
+
+case "$ingress_bridge" in
+  br-vvr-ingress) ;;
+  *)
+    stage_name "$ingress_bridge" '^br-vvr-s[0-9a-f]{6}i$' || {
+      echo "refusing unexpected ingress bridge $ingress_bridge" >&2
+      exit 1
+    }
+    ;;
+esac
+
+case "$ingress_port" in
+  ''|*[!0-9]*)
+    echo "refusing ingress port $ingress_port" >&2
+    exit 1
+    ;;
+esac
+if [ "$ingress_port" -lt 1024 ] || [ "$ingress_port" -gt 65535 ]; then
+  echo "refusing ingress port $ingress_port" >&2
+  exit 1
+fi
+
+printf '%s %s\n' "$ingress_relay" "$ingress_upstream" | awk 'BEGIN { ok=0 }
+  {
+    split($1, relay, ".")
+    split($2, upstream, ".")
+    if (relay[1]==172 && relay[2]==30 && relay[4]==2 && upstream[1]==172 && upstream[2]==30 && upstream[4]==10 && relay[3]==upstream[3] && relay[3]+0>=128 && relay[3]+0<=251)
+      ok=1
+  }
+  END { exit ok ? 0 : 1 }' || {
+  echo "refusing ingress relay $ingress_relay upstream $ingress_upstream" >&2
+  exit 1
+}
 
 case "$app_bridge" in
   br-vvr-s*)
@@ -104,12 +148,20 @@ case "$app_bridge" in
       echo "refusing mismatched stage names" >&2
       exit 1
     fi
-    if [ -n "$publish_bridge" ]; then
-      publish_tag=$(printf '%s\n' "$publish_bridge" | sed 's/^br-vvr-s//; s/p$//')
-      if [ "$publish_tag" != "$app_tag" ]; then
-        echo "refusing mismatched stage names" >&2
-        exit 1
-      fi
+    publish_tag=$(printf '%s\n' "$publish_bridge" | sed 's/^br-vvr-s//; s/p$//')
+    ingress_tag=$(printf '%s\n' "$ingress_bridge" | sed 's/^br-vvr-s//; s/i$//')
+    if [ "$publish_tag" != "$app_tag" ] || [ "$ingress_tag" != "$app_tag" ]; then
+      echo "refusing mismatched stage names" >&2
+      exit 1
+    fi
+    ;;
+esac
+
+case "$app_bridge" in
+  br-vvr-app|br-vvr-cia|br-vvr-stga)
+    if [ "$ingress_bridge" != "br-vvr-ingress" ] || [ "$publish_bridge" != "br-vvr-publish" ]; then
+      echo "refusing mismatched ingress bridges for $app_bridge" >&2
+      exit 1
     fi
     ;;
 esac
@@ -130,21 +182,14 @@ bridge_present() {
 }
 
 bridges_ready() {
-  bridge_present "$app_bridge" && bridge_present "$egress_bridge" || return 1
-  if [ -n "$publish_bridge" ] && ! bridge_present "$publish_bridge"; then
-    return 1
-  fi
+  bridge_present "$app_bridge" || return 1
+  bridge_present "$egress_bridge" || return 1
+  bridge_present "$ingress_bridge" || return 1
+  bridge_present "$publish_bridge" || return 1
   return 0
 }
 
 rules_file() {
-  publish_forward=""
-  publish_input=""
-  if [ -n "$publish_bridge" ]; then
-    publish_input="    iifname \"${publish_bridge}\" ct state established,related counter accept
-    iifname \"${publish_bridge}\" counter drop"
-    publish_forward="$publish_input"
-  fi
   cat <<EOF
 table inet ${table} {
   set bogon4 {
@@ -172,17 +217,23 @@ table inet ${table} {
     type filter hook input priority -150; policy accept;
     iifname "${app_bridge}" meta nfproto ipv6 counter drop
     iifname "${egress_bridge}" meta nfproto ipv6 counter drop
+    iifname "${publish_bridge}" meta nfproto ipv6 counter drop
+    iifname "${ingress_bridge}" meta nfproto ipv6 counter drop
     iifname "${app_bridge}" ct state established,related counter accept
     iifname "${app_bridge}" counter drop
     iifname "${egress_bridge}" ct state established,related counter accept
     iifname "${egress_bridge}" counter drop
-${publish_input}
+    iifname "${publish_bridge}" ct state established,related counter accept
+    iifname "${publish_bridge}" counter drop
+    iifname "${ingress_bridge}" counter drop
   }
 
   chain forward {
     type filter hook forward priority -150; policy accept;
     iifname "${app_bridge}" meta nfproto ipv6 counter drop
     iifname "${egress_bridge}" meta nfproto ipv6 counter drop
+    iifname "${publish_bridge}" meta nfproto ipv6 counter drop
+    iifname "${ingress_bridge}" meta nfproto ipv6 counter drop
     iifname "${app_bridge}" ct state established,related counter accept
     iifname "${app_bridge}" ip daddr ${proxy_ip} tcp dport 3128 counter accept
     iifname "${app_bridge}" counter drop
@@ -190,7 +241,42 @@ ${publish_input}
     iifname "${egress_bridge}" ip daddr @bogon4 counter drop
     iifname "${egress_bridge}" tcp dport 443 counter accept
     iifname "${egress_bridge}" counter drop
-${publish_forward}
+    iifname "${publish_bridge}" ct state established,related counter accept
+    iifname "${publish_bridge}" counter drop
+    iifname "${ingress_bridge}" ct state established,related counter accept
+    iifname "${ingress_bridge}" ip saddr ${ingress_relay} ip daddr ${ingress_upstream} tcp dport ${ingress_port} ct state new counter accept
+    iifname "${ingress_bridge}" counter drop
+  }
+}
+
+table bridge ${table} {
+  chain input {
+    type filter hook input priority -150; policy accept;
+    meta ibrname "${app_bridge}" ether type ip6 counter drop
+    meta ibrname "${egress_bridge}" ether type ip6 counter drop
+    meta ibrname "${publish_bridge}" ether type ip6 counter drop
+    meta ibrname "${ingress_bridge}" ether type ip6 counter drop
+    meta ibrname "${publish_bridge}" ether type ip tcp sport ${ingress_port} counter accept
+    meta ibrname "${publish_bridge}" ether type ip counter drop
+    meta ibrname "${ingress_bridge}" ether type ip counter drop
+  }
+
+  chain forward {
+    type filter hook forward priority -150; policy accept;
+    meta ibrname "${app_bridge}" ether type ip6 counter drop
+    meta ibrname "${egress_bridge}" ether type ip6 counter drop
+    meta ibrname "${publish_bridge}" ether type ip6 counter drop
+    meta ibrname "${ingress_bridge}" ether type ip6 counter drop
+    meta ibrname "${app_bridge}" ether type ip ip daddr ${proxy_ip} tcp dport 3128 counter accept
+    meta ibrname "${app_bridge}" ether type ip ip saddr ${proxy_ip} tcp sport 3128 counter accept
+    meta ibrname "${app_bridge}" ether type ip counter drop
+    meta ibrname "${egress_bridge}" ether type ip tcp dport 443 counter accept
+    meta ibrname "${egress_bridge}" ether type ip tcp sport 443 counter accept
+    meta ibrname "${egress_bridge}" ether type ip counter drop
+    meta ibrname "${publish_bridge}" ether type ip counter drop
+    meta ibrname "${ingress_bridge}" ether type ip ip saddr ${ingress_relay} ip daddr ${ingress_upstream} tcp dport ${ingress_port} counter accept
+    meta ibrname "${ingress_bridge}" ether type ip ip saddr ${ingress_upstream} tcp sport ${ingress_port} ip daddr ${ingress_relay} counter accept
+    meta ibrname "${ingress_bridge}" ether type ip counter drop
   }
 }
 EOF
@@ -206,8 +292,8 @@ install_rules() {
     exit 1
   fi
 
-  if timeout 15 "$nft_cmd" list table inet "$table" >/dev/null 2>&1; then
-    echo "refusing to replace existing table inet ${table}" >&2
+  if timeout 15 "$nft_cmd" list table inet "$table" >/dev/null 2>&1 || timeout 15 "$nft_cmd" list table bridge "$table" >/dev/null 2>&1; then
+    echo "refusing to replace existing table ${table}" >&2
     exit 1
   fi
 
@@ -216,7 +302,7 @@ install_rules() {
   timeout 15 "$nft_cmd" -c -f "$tmp"
   timeout 15 "$nft_cmd" -f "$tmp"
   rm -f "$tmp"
-  echo "installed inet ${table} for ${app_bridge} and ${egress_bridge}"
+  echo "installed inet and bridge ${table} for ${app_bridge}, ${ingress_bridge}, ${egress_bridge}, and ${publish_bridge}"
 }
 
 containers_running() {
@@ -246,8 +332,9 @@ status_rules() {
     exit 1
   fi
   timeout 15 "$nft_cmd" list table inet "$table" >/dev/null
-  listed=$(timeout 15 "$nft_cmd" list table inet "$table")
-  for needle in "$app_bridge" "$egress_bridge" ${publish_bridge:+"$publish_bridge"} "$proxy_ip" "tcp dport 3128" "tcp dport 443" "100.64.0.0/10" "169.254.0.0/16"; do
+  timeout 15 "$nft_cmd" list table bridge "$table" >/dev/null
+  listed=$(timeout 15 "$nft_cmd" list table inet "$table"; timeout 15 "$nft_cmd" list table bridge "$table")
+  for needle in "$app_bridge" "$ingress_bridge" "$egress_bridge" "$publish_bridge" "$proxy_ip" "$ingress_relay" "$ingress_upstream" "tcp dport ${ingress_port}" "tcp dport 3128" "tcp dport 443" "100.64.0.0/10" "169.254.0.0/16" "meta nfproto ipv6" "ether type ip6"; do
     if ! printf '%s\n' "$listed" | grep -q -F "$needle"; then
       echo "table ${table} is missing ${needle}" >&2
       exit 1
@@ -265,11 +352,19 @@ rollback_rules() {
     echo "refusing rollback while staged containers are running" >&2
     exit 1
   fi
+  removed=0
   if timeout 15 "$nft_cmd" list table inet "$table" >/dev/null 2>&1; then
     timeout 15 "$nft_cmd" delete table inet "$table"
-    echo "removed inet ${table}"
+    removed=1
+  fi
+  if timeout 15 "$nft_cmd" list table bridge "$table" >/dev/null 2>&1; then
+    timeout 15 "$nft_cmd" delete table bridge "$table"
+    removed=1
+  fi
+  if [ "$removed" -eq 1 ]; then
+    echo "removed inet and bridge ${table}"
   else
-    echo "inet ${table} was not installed"
+    echo "inet and bridge ${table} were not installed"
   fi
 }
 

@@ -558,8 +558,12 @@ EOF
     --table "$(plan_get TABLE)" \
     --app-bridge "$(plan_get APP_BRIDGE)" \
     --egress-bridge "$(plan_get EGRESS_BRIDGE)" \
+    --ingress-bridge "$(plan_get INGRESS_BRIDGE)" \
     --publish-bridge "$(plan_get PUBLISH_BRIDGE)" \
     --proxy-ip "$(plan_get PROXY_IP)" \
+    --ingress-relay "$(plan_get INGRESS_RELAY_IP)" \
+    --ingress-upstream "$(plan_get INGRESS_UPSTREAM_IP)" \
+    --ingress-port 8080 \
     --app-network "$(plan_get APP_NETWORK)" \
     --egress-network "$(plan_get EGRESS_NETWORK)" \
     --ingress-network "$(plan_get INGRESS_NETWORK)" \
