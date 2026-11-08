@@ -6,7 +6,7 @@ Wants=docker.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/sbin/valentinvera-reviewer-egress install --if-bridges-present
+ExecStart=/usr/local/sbin/valentinvera-reviewer-egress install --if-bridges-present --publish-bridge br-vvr-publish
 # No ExecStop. Rollback is an explicit host-rules.sh rollback.
 
 [Install]

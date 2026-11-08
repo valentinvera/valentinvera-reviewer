@@ -69,9 +69,12 @@ services:
       - /tmp:size=32m,mode=1777,noexec,nosuid,nodev
     command: ["bun", "/opt/health.js"]
     restart: "no"
-    ports:
-      - 127.0.0.1:${REVIEWER_BIND_PORT}:8080
     networks:
-      - app
+      app: {}
+      ingress:
+        ipv4_address: ${INGRESS_UPSTREAM_IP:?set INGRESS_UPSTREAM_IP}
     depends_on:
       - proxy
+
+  ingress:
+    restart: "no"

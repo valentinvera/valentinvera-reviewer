@@ -14,7 +14,7 @@ fail() {
 }
 
 echo "== syntax"
-for script in render-squid-conf.sh proxy-entrypoint.sh app-entrypoint.sh host-rules.sh stage-perms.sh host-stage.sh pack-bundle.sh; do
+for script in render-squid-conf.sh proxy-entrypoint.sh app-entrypoint.sh ingress-entrypoint.sh host-rules.sh stage-perms.sh host-stage.sh pack-bundle.sh; do
   sh -n "$root/$script"
 done
 
@@ -64,7 +64,14 @@ grep -q 'could not allocate' "$work/collide.err" || fail "collision did not expl
 grep -q '^PROJECT=vvrstabcdef$' "$work/ok.plan" || fail "project was not unique"
 grep -q '^TABLE=reviewer_egress_sabcdef$' "$work/ok.plan" || fail "table was not unique"
 grep -q '^APP_BRIDGE=br-vvr-sabcdefa$' "$work/ok.plan" || fail "bridge was not unique"
+grep -q '^INGRESS_BRIDGE=br-vvr-sabcdefi$' "$work/ok.plan" || fail "ingress bridge missing"
+grep -q '^PUBLISH_BRIDGE=br-vvr-sabcdefp$' "$work/ok.plan" || fail "publish bridge missing"
+grep -q '^INGRESS_UPSTREAM_IP=172.30.145.10$' "$work/ok.plan" || fail "ingress upstream missing"
+grep -q '^PUBLISH_SUBNET=172.30.146.0/24$' "$work/ok.plan" || fail "publish subnet missing"
 grep -q '^PORT=3000$' "$work/ok.plan" && fail "plan used port 3000"
+grep -q '^PORT=20831$' "$work/ok.plan" && fail "plan reused the retained port"
+"$root/host-stage.sh" plan --inventory "$work/empty-inventory" --suffix a41b73 --plan "$work/retained.plan" --stage-dir "$work" >/dev/null 2>"$work/retained.err" && fail "retained stage was planned"
+grep -q 'refusing retained stage' "$work/retained.err" || fail "retained stage refusal missing"
 "$root/host-stage.sh" preflight --inventory "$work/empty-inventory" --plan "$work/ok.plan" >/dev/null
 "$root/host-stage.sh" preflight --inventory "$work/inventory" --plan "$work/ok.plan" >/dev/null 2>"$work/preflight.err" && fail "preflight replaced an existing bridge"
 grep -q 'refusing to replace' "$work/preflight.err" || fail "preflight did not refuse"
@@ -74,6 +81,14 @@ mkdir -p "$work/bin" "$work/lock"
 cat > "$work/bin/nft" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$NFT_LOG"
+if [ "$1" = "-c" ] && [ "$2" = "-f" ]; then
+  cat "$3" >> "$NFT_LOG"
+  exit 0
+fi
+if [ "$1" = "-f" ]; then
+  cat "$2" >> "$NFT_LOG"
+  exit 0
+fi
 if [ "$1" = list ] && [ ! -f "$NFT_EXISTS" ]; then
   exit 1
 fi
@@ -107,13 +122,18 @@ export EGRESS_LOCK_DIR="$work/lock"
   --table reviewer_egress_sabcdef \
   --app-bridge br-vvr-sabcdefa \
   --egress-bridge br-vvr-sabcdefe \
+  --publish-bridge br-vvr-sabcdefp \
   --proxy-ip 172.30.143.2 \
   --app-network vvrstabcdefa \
-  --egress-network vvrstabcdefe >/dev/null
+  --egress-network vvrstabcdefe \
+  --ingress-network vvrstabcdefi \
+  --publish-network vvrstabcdefp >/dev/null
 if grep -q 'delete table' "$NFT_LOG"; then
   fail "install deleted an nft table"
 fi
 grep -q '^-f ' "$NFT_LOG" || fail "install did not load rules"
+grep -q 'iifname "br-vvr-sabcdefp" counter drop' "$NFT_LOG" || fail "publish bridge is not denied"
+grep -q 'iifname "br-vvr-sabcdefp" tcp dport' "$NFT_LOG" && fail "publish bridge allows a new destination"
 touch "$NFT_EXISTS"
 : > "$NFT_LOG"
 "$root/host-rules.sh" install \
@@ -175,6 +195,17 @@ APP_BRIDGE=br-vvr-sabcdefa
 EGRESS_BRIDGE=br-vvr-sabcdefe
 EGRESS_SUBNET=172.30.144.0/24
 EGRESS_GATEWAY=172.30.144.1
+INGRESS_NETWORK_NAME=vvrstabcdefi
+INGRESS_BRIDGE=br-vvr-sabcdefi
+INGRESS_SUBNET=172.30.145.0/24
+INGRESS_GATEWAY=172.30.145.1
+INGRESS_RELAY_IP=172.30.145.2
+INGRESS_UPSTREAM_IP=172.30.145.10
+INGRESS_LISTEN_PORT=8080
+PUBLISH_NETWORK_NAME=vvrstabcdefp
+PUBLISH_BRIDGE=br-vvr-sabcdefp
+PUBLISH_SUBNET=172.30.146.0/24
+PUBLISH_GATEWAY=172.30.146.1
 TEST_CONF=$work/squid.conf
 TEST_DIR=$work
 FIXTURE_DIR=$work/fixture
@@ -190,8 +221,73 @@ if grep -q 'NET_BIND_SERVICE\|network_mode: host\|docker.sock\|user: "0:0"\|user
   fail "rendered compose weakens the fixture"
 fi
 grep -q 'user: 10001:10001' "$work/render.yml" || fail "fixture user missing"
+grep -q "user: \"65534:65534\"" "$work/render.yml" || grep -q 'user: 65534:65534' "$work/render.yml" || fail "ingress user missing"
 grep -q 'no-new-privileges:true' "$work/render.yml" || fail "nnp missing"
 grep -q 'read_only: true' "$work/render.yml" || fail "read only missing"
+grep -q 'enable_ip_masquerade: "false"' "$work/render.yml" || fail "publish network masquerades"
+sudo docker compose --env-file "$work/env" -f "$root/compose.yml" -f "$root/compose.test.yml" config --format json > "$work/render.json"
+python3 - "$work/render.json" <<'PY' || fail "rendered ingress topology is wrong"
+import json, sys
+cfg = json.load(open(sys.argv[1]))
+client = cfg["services"]["client"]
+ingress = cfg["services"]["ingress"]
+assert "ports" not in client or not client["ports"], client.get("ports")
+assert set(client["networks"]) == {"app", "ingress"}, client["networks"]
+assert client["networks"]["ingress"]["ipv4_address"] == "172.30.145.10"
+ports = ingress["ports"]
+assert len(ports) == 1, ports
+assert ports[0]["host_ip"] == "127.0.0.1"
+assert str(ports[0]["published"]) == "20375"
+assert int(ports[0]["target"]) == 8080
+assert set(ingress["networks"]) == {"ingress", "publish"}, ingress["networks"]
+nets = cfg["networks"]
+assert nets["app"]["internal"] is True
+assert nets["ingress"]["internal"] is True
+assert nets["publish"].get("internal") is not True
+assert nets["egress"].get("internal") is not True
+assert nets["publish"]["driver_opts"]["com.docker.network.bridge.enable_ip_masquerade"] == "false"
+assert "egress" not in client["networks"]
+assert "publish" not in client["networks"]
+assert "app" not in ingress["networks"]
+assert "egress" not in ingress["networks"]
+PY
+sed 's/^INGRESS_LISTEN_PORT=8080/INGRESS_LISTEN_PORT=3000/' "$work/env" > "$work/prod.env"
+sudo docker compose --profile app --env-file "$work/prod.env" -f "$root/compose.yml" config --format json > "$work/prod.json"
+python3 - "$work/prod.json" <<'PY' || fail "production ingress topology is wrong"
+import json, sys
+cfg = json.load(open(sys.argv[1]))
+app = cfg["services"]["app"]
+ingress = cfg["services"]["ingress"]
+assert "ports" not in app or not app["ports"], app.get("ports")
+assert set(app["networks"]) == {"app", "ingress"}
+assert app["networks"]["ingress"]["ipv4_address"] == "172.30.145.10"
+assert "publish" not in app["networks"] and "egress" not in app["networks"]
+assert cfg["networks"]["app"]["internal"] is True
+assert cfg["networks"]["ingress"]["internal"] is True
+assert cfg["networks"]["publish"].get("internal") is not True
+ports = ingress["ports"]
+assert ports[0]["host_ip"] == "127.0.0.1"
+assert int(ports[0]["target"]) == 3000
+assert set(ingress["networks"]) == {"ingress", "publish"}
+PY
+
+echo "== ingress relay"
+cat > "$work/socat" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" > "$SOCAT_ARGS"
+exit 0
+EOF
+chmod 0755 "$work/socat"
+SOCAT_ARGS="$work/socat.args" PATH="$work:$PATH" \
+  INGRESS_LISTEN_PORT=8080 INGRESS_UPSTREAM=172.30.145.10:8080 \
+  "$root/ingress-entrypoint.sh"
+grep -q 'TCP-LISTEN:8080,bind=0.0.0.0,reuseaddr,fork,max-children=16' "$work/socat.args" || fail "listen socket was not one port"
+grep -q 'TCP:172.30.145.10:8080' "$work/socat.args" || fail "upstream was not the single address"
+INGRESS_LISTEN_PORT=8080 INGRESS_UPSTREAM=10.1.1.1:8080 "$root/ingress-entrypoint.sh" >/dev/null 2>"$work/relay.err" && fail "relay accepted an upstream outside the ingress address"
+grep -q '172.30.<octet>.10' "$work/relay.err" || fail "relay refusal missing"
+INGRESS_LISTEN_PORT=8080 INGRESS_UPSTREAM=idle.fixture:8080 "$root/ingress-entrypoint.sh" >/dev/null 2>"$work/relay-name.err" && fail "relay accepted a hostname"
+INGRESS_LISTEN_PORT=80 INGRESS_UPSTREAM=172.30.145.10:80 "$root/ingress-entrypoint.sh" >/dev/null 2>&1 && fail "relay accepted a privileged port"
+"$root/ingress-entrypoint.sh" extra >/dev/null 2>&1 && fail "relay accepted arguments"
 
 echo "== canonical bundle"
 "$root/pack-bundle.sh" "$work/bundle"

@@ -52,7 +52,17 @@ need() {
 
 forbidden_value() {
   case "$1" in
-    valentinvera-reviewer|reviewer_egress|br-vvr-app|br-vvr-egress|br-f5d584fd553b|172.18.0.0/16|172.30.208.0/24|3000)
+    valentinvera-reviewer|reviewer_egress|br-vvr-app|br-vvr-egress|br-vvr-ingress|br-vvr-publish|br-f5d584fd553b|172.18.0.0/16|172.30.208.0/24|172.30.216.0/24|172.30.219.0/24|172.30.220.0/24|3000)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# The host still has the stopped a41b73 stage. Never allocate it again.
+reserved_value() {
+  case "$1" in
+    a41b73|sa41b73|vvrsta41b73|vvrsta41b73a|vvrsta41b73e|br-vvr-sa41b73a|br-vvr-sa41b73e|reviewer_egress_sa41b73|172.30.149.0/24|172.30.150.0/24|20831)
       return 0
       ;;
   esac
@@ -72,21 +82,33 @@ write_plan() {
   app_octet="$2"
   egress_octet="$3"
   port_value="$4"
+  ingress_octet="$5"
+  publish_octet="$6"
   cat > "$plan_file" <<EOF
 SUFFIX=${suffix_value}
 PROJECT=vvrst${suffix_value}
 TABLE=reviewer_egress_s${suffix_value}
 APP_BRIDGE=br-vvr-s${suffix_value}a
 EGRESS_BRIDGE=br-vvr-s${suffix_value}e
+INGRESS_BRIDGE=br-vvr-s${suffix_value}i
+PUBLISH_BRIDGE=br-vvr-s${suffix_value}p
 APP_SUBNET=172.30.${app_octet}.0/24
 APP_GATEWAY=172.30.${app_octet}.1
 PROXY_IP=172.30.${app_octet}.2
 EGRESS_SUBNET=172.30.${egress_octet}.0/24
 EGRESS_GATEWAY=172.30.${egress_octet}.1
 FIXTURE_IP=172.30.${egress_octet}.10
+INGRESS_SUBNET=172.30.${ingress_octet}.0/24
+INGRESS_GATEWAY=172.30.${ingress_octet}.1
+INGRESS_RELAY_IP=172.30.${ingress_octet}.2
+INGRESS_UPSTREAM_IP=172.30.${ingress_octet}.10
+PUBLISH_SUBNET=172.30.${publish_octet}.0/24
+PUBLISH_GATEWAY=172.30.${publish_octet}.1
 PORT=${port_value}
 APP_NETWORK=vvrst${suffix_value}a
 EGRESS_NETWORK=vvrst${suffix_value}e
+INGRESS_NETWORK=vvrst${suffix_value}i
+PUBLISH_NETWORK=vvrst${suffix_value}p
 IMAGE_TAG=s${suffix_value}
 STAGE_DIR=${stage_dir}
 EOF
@@ -97,14 +119,22 @@ plan_collides() {
   app_octet="$2"
   egress_octet="$3"
   port_value="$4"
+  ingress_octet=$((app_octet + 2))
+  publish_octet=$((app_octet + 3))
   inventory_has bridge "br-vvr-s${suffix_value}a" && return 0
   inventory_has bridge "br-vvr-s${suffix_value}e" && return 0
+  inventory_has bridge "br-vvr-s${suffix_value}i" && return 0
+  inventory_has bridge "br-vvr-s${suffix_value}p" && return 0
   inventory_has table "reviewer_egress_s${suffix_value}" && return 0
   inventory_has network "vvrst${suffix_value}a" && return 0
   inventory_has network "vvrst${suffix_value}e" && return 0
+  inventory_has network "vvrst${suffix_value}i" && return 0
+  inventory_has network "vvrst${suffix_value}p" && return 0
   inventory_has project "vvrst${suffix_value}" && return 0
   inventory_has subnet "172.30.${app_octet}.0/24" && return 0
   inventory_has subnet "172.30.${egress_octet}.0/24" && return 0
+  inventory_has subnet "172.30.${ingress_octet}.0/24" && return 0
+  inventory_has subnet "172.30.${publish_octet}.0/24" && return 0
   inventory_has port "$port_value" && return 0
   if grep -F -e "vvrst${suffix_value}-" "$inventory_file" >/dev/null 2>&1; then
     return 0
@@ -144,19 +174,31 @@ choose_plan() {
       [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
       *) continue ;;
     esac
+    if reserved_value "$candidate" || reserved_value "s$candidate" || reserved_value "vvrst$candidate"; then
+      echo "refusing retained stage $candidate" >&2
+      continue
+    fi
     app_octet=$((128 + (0x$candidate % 90)))
     egress_octet=$((app_octet + 1))
-    if ! octet_ok "$app_octet" || ! octet_ok "$egress_octet"; then
+    ingress_octet=$((app_octet + 2))
+    publish_octet=$((app_octet + 3))
+    if ! octet_ok "$app_octet" || ! octet_ok "$egress_octet" || ! octet_ok "$ingress_octet" || ! octet_ok "$publish_octet"; then
       continue
     fi
     port_value=$((20000 + (0x$candidate % 900)))
-    if [ "$port_value" -eq 3000 ]; then
+    if [ "$port_value" -eq 3000 ] || [ "$port_value" -eq 20831 ]; then
+      continue
+    fi
+    if reserved_value "172.30.${app_octet}.0/24" || reserved_value "172.30.${egress_octet}.0/24" \
+      || reserved_value "172.30.${ingress_octet}.0/24" || reserved_value "172.30.${publish_octet}.0/24" \
+      || reserved_value "$port_value"; then
+      echo "refusing retained stage address for $candidate" >&2
       continue
     fi
     if plan_collides "$candidate" "$app_octet" "$egress_octet" "$port_value"; then
       continue
     fi
-    write_plan "$candidate" "$app_octet" "$egress_octet" "$port_value"
+    write_plan "$candidate" "$app_octet" "$egress_octet" "$port_value" "$ingress_octet" "$publish_octet"
     echo "planned $(plan_get SUFFIX) on port $(plan_get PORT)"
     return 0
   done
@@ -177,25 +219,31 @@ preflight_plan() {
     echo "preflight needs --inventory" >&2
     exit 1
   }
-  for key in PROJECT TABLE APP_BRIDGE EGRESS_BRIDGE APP_SUBNET PORT APP_NETWORK EGRESS_NETWORK IMAGE_TAG PROXY_IP; do
+  for key in PROJECT TABLE APP_BRIDGE EGRESS_BRIDGE INGRESS_BRIDGE PUBLISH_BRIDGE APP_SUBNET EGRESS_SUBNET INGRESS_SUBNET PUBLISH_SUBNET PORT APP_NETWORK EGRESS_NETWORK INGRESS_NETWORK PUBLISH_NETWORK IMAGE_TAG PROXY_IP INGRESS_UPSTREAM_IP INGRESS_RELAY_IP; do
     value=$(plan_get "$key")
     if [ -z "$value" ]; then
       echo "plan is missing $key" >&2
       exit 1
     fi
-    if forbidden_value "$value"; then
+    if forbidden_value "$value" || reserved_value "$value"; then
       echo "refusing plan value $value" >&2
       exit 1
     fi
   done
   if inventory_has bridge "$(plan_get APP_BRIDGE)" \
     || inventory_has bridge "$(plan_get EGRESS_BRIDGE)" \
+    || inventory_has bridge "$(plan_get INGRESS_BRIDGE)" \
+    || inventory_has bridge "$(plan_get PUBLISH_BRIDGE)" \
     || inventory_has table "$(plan_get TABLE)" \
     || inventory_has network "$(plan_get APP_NETWORK)" \
     || inventory_has network "$(plan_get EGRESS_NETWORK)" \
+    || inventory_has network "$(plan_get INGRESS_NETWORK)" \
+    || inventory_has network "$(plan_get PUBLISH_NETWORK)" \
     || inventory_has project "$(plan_get PROJECT)" \
     || inventory_has subnet "$(plan_get APP_SUBNET)" \
     || inventory_has subnet "$(plan_get EGRESS_SUBNET)" \
+    || inventory_has subnet "$(plan_get INGRESS_SUBNET)" \
+    || inventory_has subnet "$(plan_get PUBLISH_SUBNET)" \
     || inventory_has port "$(plan_get PORT)"; then
     echo "refusing to replace an existing stage resource" >&2
     exit 1
@@ -440,6 +488,17 @@ APP_BRIDGE=$(plan_get APP_BRIDGE)
 EGRESS_BRIDGE=$(plan_get EGRESS_BRIDGE)
 EGRESS_SUBNET=$(plan_get EGRESS_SUBNET)
 EGRESS_GATEWAY=$(plan_get EGRESS_GATEWAY)
+INGRESS_NETWORK_NAME=$(plan_get INGRESS_NETWORK)
+INGRESS_BRIDGE=$(plan_get INGRESS_BRIDGE)
+INGRESS_SUBNET=$(plan_get INGRESS_SUBNET)
+INGRESS_GATEWAY=$(plan_get INGRESS_GATEWAY)
+INGRESS_RELAY_IP=$(plan_get INGRESS_RELAY_IP)
+INGRESS_UPSTREAM_IP=$(plan_get INGRESS_UPSTREAM_IP)
+INGRESS_LISTEN_PORT=8080
+PUBLISH_NETWORK_NAME=$(plan_get PUBLISH_NETWORK)
+PUBLISH_BRIDGE=$(plan_get PUBLISH_BRIDGE)
+PUBLISH_SUBNET=$(plan_get PUBLISH_SUBNET)
+PUBLISH_GATEWAY=$(plan_get PUBLISH_GATEWAY)
 TEST_CONF=$stage_dir/squid.conf
 TEST_DIR=$stage_dir
 FIXTURE_DIR=$stage_dir/fixture
@@ -449,20 +508,28 @@ IDLE_MS=$((idle_seconds * 1000))
 EOF
   rendered=$(timeout 60 "$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" config)
   printf '%s\n' "$rendered" | grep -q 'internal: true' || stage_fail "rendered compose is not an internal app network"
+  printf '%s\n' "$rendered" | grep -q 'enable_ip_masquerade: "false"' || stage_fail "publish network masquerades"
   if printf '%s\n' "$rendered" | grep -q 'NET_BIND_SERVICE\|network_mode: host\|docker.sock'; then
     stage_fail "rendered compose adds a capability, the host network, or the docker socket"
   fi
-  timeout 600 "$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" build proxy
-  timeout 180 "$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" up -d proxy fixture client
+  timeout 600 "$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" build proxy ingress
+  timeout 180 "$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" up -d proxy fixture client ingress
   client_id=$("$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" ps -q client)
+  ingress_id=$("$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" ps -q ingress)
   proxy_id=$("$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" ps -q proxy)
   tcp_ok=0
   publish_ok=0
   if timeout 8 "$docker_cmd" exec "$client_id" bun /opt/client.js direct "$(plan_get PROXY_IP)" 3128; then
     tcp_ok=1
   fi
-  ports=$("$docker_cmd" inspect "$client_id" --format '{{json .NetworkSettings.Ports}}')
-  echo "client port map: $ports"
+  client_ports=$("$docker_cmd" inspect "$client_id" --format '{{json .NetworkSettings.Ports}}')
+  ports=$("$docker_cmd" inspect "$ingress_id" --format '{{json .NetworkSettings.Ports}}')
+  echo "client port map: $client_ports"
+  echo "ingress port map: $ports"
+  if printf '%s\n' "$client_ports" | grep -q 'HostPort'; then
+    echo "client published a port; the isolated app must not own the host mapping" >&2
+    stage_fail "client port map"
+  fi
   if timeout 5 curl -fsS "http://127.0.0.1:$(plan_get PORT)/" | grep -q ok; then
     publish_ok=1
   fi
@@ -491,9 +558,15 @@ EOF
     --table "$(plan_get TABLE)" \
     --app-bridge "$(plan_get APP_BRIDGE)" \
     --egress-bridge "$(plan_get EGRESS_BRIDGE)" \
+    --publish-bridge "$(plan_get PUBLISH_BRIDGE)" \
     --proxy-ip "$(plan_get PROXY_IP)" \
     --app-network "$(plan_get APP_NETWORK)" \
-    --egress-network "$(plan_get EGRESS_NETWORK)"
+    --egress-network "$(plan_get EGRESS_NETWORK)" \
+    --ingress-network "$(plan_get INGRESS_NETWORK)" \
+    --publish-network "$(plan_get PUBLISH_NETWORK)"
+  if ! timeout 5 curl -fsS "http://127.0.0.1:$(plan_get PORT)/" | grep -q ok; then
+    stage_fail "loopback ingress failed after nft"
+  fi
   client_exec 25 https "https://api.github.com/" | grep -q '^200 ' || stage_fail "proxy path failed after nft"
   client_exec 12 proxy-false "https://api.github.com/" && stage_fail "direct path stayed open"
   print_inventory

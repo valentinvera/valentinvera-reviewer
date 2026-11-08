@@ -9,8 +9,11 @@ table="reviewer_egress"
 app_bridge="br-vvr-app"
 egress_bridge="br-vvr-egress"
 proxy_ip="172.30.208.2"
+publish_bridge=""
 app_network=""
 egress_network=""
+ingress_network=""
+publish_network=""
 if_bridges_present=0
 confirm_stopped=0
 action="status"
@@ -19,7 +22,7 @@ docker_cmd="${EGRESS_DOCKER:-docker}"
 lock_dir="${EGRESS_LOCK_DIR:-/run/lock}"
 
 usage() {
-  echo "usage: host-rules.sh {install|status|rollback} [--table NAME] [--app-bridge IF] [--egress-bridge IF] [--proxy-ip ADDR] [--app-network NAME] [--egress-network NAME] [--if-bridges-present] [--confirm-stopped]" >&2
+  echo "usage: host-rules.sh {install|status|rollback} [--table NAME] [--app-bridge IF] [--egress-bridge IF] [--publish-bridge IF] [--proxy-ip ADDR] [--app-network NAME] [--egress-network NAME] [--ingress-network NAME] [--publish-network NAME] [--if-bridges-present] [--confirm-stopped]" >&2
   exit 1
 }
 
@@ -29,9 +32,12 @@ while [ $# -gt 0 ]; do
     --table) table="$2"; shift 2 ;;
     --app-bridge) app_bridge="$2"; shift 2 ;;
     --egress-bridge) egress_bridge="$2"; shift 2 ;;
+    --publish-bridge) publish_bridge="$2"; shift 2 ;;
     --proxy-ip) proxy_ip="$2"; shift 2 ;;
     --app-network) app_network="$2"; shift 2 ;;
     --egress-network) egress_network="$2"; shift 2 ;;
+    --ingress-network) ingress_network="$2"; shift 2 ;;
+    --publish-network) publish_network="$2"; shift 2 ;;
     --if-bridges-present) if_bridges_present=1; shift ;;
     --confirm-stopped) confirm_stopped=1; shift ;;
     *) usage ;;
@@ -72,9 +78,21 @@ case "$egress_bridge" in
     ;;
 esac
 
-if [ "$app_bridge" = "$egress_bridge" ]; then
+if [ "$app_bridge" = "$egress_bridge" ] || { [ -n "$publish_bridge" ] && { [ "$publish_bridge" = "$app_bridge" ] || [ "$publish_bridge" = "$egress_bridge" ]; }; }; then
   echo "app and egress bridges must differ" >&2
   exit 1
+fi
+
+if [ -n "$publish_bridge" ]; then
+  case "$publish_bridge" in
+    br-vvr-publish) ;;
+    *)
+      stage_name "$publish_bridge" '^br-vvr-s[0-9a-f]{6}p$' || {
+        echo "refusing unexpected publish bridge $publish_bridge" >&2
+        exit 1
+      }
+      ;;
+  esac
 fi
 
 case "$app_bridge" in
@@ -85,6 +103,13 @@ case "$app_bridge" in
     if [ "$app_tag" != "$egress_tag" ] || [ "$app_tag" != "$table_tag" ]; then
       echo "refusing mismatched stage names" >&2
       exit 1
+    fi
+    if [ -n "$publish_bridge" ]; then
+      publish_tag=$(printf '%s\n' "$publish_bridge" | sed 's/^br-vvr-s//; s/p$//')
+      if [ "$publish_tag" != "$app_tag" ]; then
+        echo "refusing mismatched stage names" >&2
+        exit 1
+      fi
     fi
     ;;
 esac
@@ -104,7 +129,22 @@ bridge_present() {
   "${EGRESS_IP:-ip}" link show "$1" >/dev/null 2>&1
 }
 
+bridges_ready() {
+  bridge_present "$app_bridge" && bridge_present "$egress_bridge" || return 1
+  if [ -n "$publish_bridge" ] && ! bridge_present "$publish_bridge"; then
+    return 1
+  fi
+  return 0
+}
+
 rules_file() {
+  publish_forward=""
+  publish_input=""
+  if [ -n "$publish_bridge" ]; then
+    publish_input="    iifname \"${publish_bridge}\" ct state established,related counter accept
+    iifname \"${publish_bridge}\" counter drop"
+    publish_forward="$publish_input"
+  fi
   cat <<EOF
 table inet ${table} {
   set bogon4 {
@@ -136,6 +176,7 @@ table inet ${table} {
     iifname "${app_bridge}" counter drop
     iifname "${egress_bridge}" ct state established,related counter accept
     iifname "${egress_bridge}" counter drop
+${publish_input}
   }
 
   chain forward {
@@ -149,13 +190,14 @@ table inet ${table} {
     iifname "${egress_bridge}" ip daddr @bogon4 counter drop
     iifname "${egress_bridge}" tcp dport 443 counter accept
     iifname "${egress_bridge}" counter drop
+${publish_forward}
   }
 }
 EOF
 }
 
 install_rules() {
-  if ! bridge_present "$app_bridge" || ! bridge_present "$egress_bridge"; then
+  if ! bridges_ready; then
     if [ "$if_bridges_present" -eq 1 ]; then
       echo "bridges not present; nothing to enforce"
       return 0
@@ -185,6 +227,12 @@ containers_running() {
   if [ -n "$egress_network" ]; then
     set -- "$@" -e "$egress_network"
   fi
+  if [ -n "$ingress_network" ]; then
+    set -- "$@" -e "$ingress_network"
+  fi
+  if [ -n "$publish_network" ]; then
+    set -- "$@" -e "$publish_network"
+  fi
   if [ $# -eq 0 ]; then
     return 1
   fi
@@ -193,13 +241,13 @@ containers_running() {
 }
 
 status_rules() {
-  if ! bridge_present "$app_bridge" || ! bridge_present "$egress_bridge"; then
+  if ! bridges_ready; then
     echo "required bridge is missing" >&2
     exit 1
   fi
   timeout 15 "$nft_cmd" list table inet "$table" >/dev/null
   listed=$(timeout 15 "$nft_cmd" list table inet "$table")
-  for needle in "$app_bridge" "$egress_bridge" "$proxy_ip" "tcp dport 3128" "tcp dport 443" "100.64.0.0/10" "169.254.0.0/16"; do
+  for needle in "$app_bridge" "$egress_bridge" ${publish_bridge:+"$publish_bridge"} "$proxy_ip" "tcp dport 3128" "tcp dport 443" "100.64.0.0/10" "169.254.0.0/16"; do
     if ! printf '%s\n' "$listed" | grep -q -F "$needle"; then
       echo "table ${table} is missing ${needle}" >&2
       exit 1

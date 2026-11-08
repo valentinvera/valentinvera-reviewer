@@ -58,20 +58,47 @@ services:
       - ${REVIEWER_SECRETS_DIR:?set REVIEWER_SECRETS_DIR}:/app/secrets:ro
     tmpfs:
       - /tmp:size=64m,mode=1777,noexec,nosuid,nodev
-    ports:
-      - 127.0.0.1:${REVIEWER_BIND_PORT:-3000}:3000
     networks:
-      - app
+      app: {}
+      ingress:
+        ipv4_address: ${INGRESS_UPSTREAM_IP:?set INGRESS_UPSTREAM_IP}
     depends_on:
       - proxy
+    restart: unless-stopped
+
+  ingress:
+    build:
+      context: .
+      dockerfile: Dockerfile.ingress
+    image: valentinvera-reviewer-ingress:${EGRESS_IMAGE_TAG:-1}
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 64m
+    cpus: 0.25
+    user: "65534:65534"
+    environment:
+      INGRESS_LISTEN_PORT: ${INGRESS_LISTEN_PORT:?set INGRESS_LISTEN_PORT}
+      INGRESS_UPSTREAM: ${INGRESS_UPSTREAM_IP:?set INGRESS_UPSTREAM_IP}:${INGRESS_LISTEN_PORT}
+    tmpfs:
+      - /tmp:size=1m,uid=65534,gid=65534,mode=0700,noexec,nosuid,nodev
+    ports:
+      - 127.0.0.1:${REVIEWER_BIND_PORT:-3000}:${INGRESS_LISTEN_PORT}
+    networks:
+      ingress:
+        ipv4_address: ${INGRESS_RELAY_IP:?set INGRESS_RELAY_IP}
+      publish: {}
     restart: unless-stopped
 
 networks:
   app:
     name: ${APP_NETWORK_NAME:?set APP_NETWORK_NAME}
-    # The app network stays internal. A cloud VM on Docker 29.1.3 left the
-    # published port unset and did not deliver same-bridge frames; that is not
-    # a reason to open this network. Retest on the staging host.
+    # Docker programs published ports on the container's default-gateway
+    # network. This network stays internal, so the app has no gateway and
+    # cannot publish a host port. Loopback ingress is the separate relay.
     internal: true
     enable_ipv6: false
     driver: bridge
@@ -92,3 +119,26 @@ networks:
       config:
         - subnet: ${EGRESS_SUBNET:?set EGRESS_SUBNET}
           gateway: ${EGRESS_GATEWAY:?set EGRESS_GATEWAY}
+  ingress:
+    name: ${INGRESS_NETWORK_NAME:?set INGRESS_NETWORK_NAME}
+    internal: true
+    enable_ipv6: false
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: ${INGRESS_BRIDGE:?set INGRESS_BRIDGE}
+    ipam:
+      config:
+        - subnet: ${INGRESS_SUBNET:?set INGRESS_SUBNET}
+          gateway: ${INGRESS_GATEWAY:?set INGRESS_GATEWAY}
+  publish:
+    name: ${PUBLISH_NETWORK_NAME:?set PUBLISH_NETWORK_NAME}
+    internal: false
+    enable_ipv6: false
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: ${PUBLISH_BRIDGE:?set PUBLISH_BRIDGE}
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+    ipam:
+      config:
+        - subnet: ${PUBLISH_SUBNET:?set PUBLISH_SUBNET}
+          gateway: ${PUBLISH_GATEWAY:?set PUBLISH_GATEWAY}

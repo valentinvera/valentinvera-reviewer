@@ -1,0 +1,12 @@
+# One-port loopback relay. Same Alpine pin as the proxy. Not a general proxy.
+# This revision does not scan the image.
+FROM alpine:3.22.1@sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1
+
+RUN apk add --no-cache 'socat=1.8.1.3-r0'
+
+COPY ingress-entrypoint.sh /usr/local/bin/ingress-entrypoint.sh
+RUN chmod 0555 /usr/local/bin/ingress-entrypoint.sh
+
+USER nobody
+
+ENTRYPOINT ["/usr/local/bin/ingress-entrypoint.sh"]

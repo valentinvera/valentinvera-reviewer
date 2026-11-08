@@ -28,8 +28,9 @@ show that the network controls work.
   resolve the two allowed names.
 - The app network is `internal: true`. The entrypoint also refuses to start
   if a direct TCP handshake to `1.1.1.1:443` succeeds. That check is present
-  so a routable network fails closed. It was not the thing that blocked the
-  cloud VM: frames never arrived on the next container.
+  so a routable network fails closed. On the hosting Docker 29.9.2 the
+  same-bridge TCP check did succeed. The cloud VM bridge failure is a
+  different machine and was not rerun.
 - With `EGRESS_REQUIRED=1`, the entrypoint refuses a missing proxy URL, a
   different proxy URL, or any `NO_PROXY` value. It accepts only the production,
   CI and staging proxy URLs.
@@ -93,9 +94,10 @@ sudo deploy/egress/host-stage.sh run --stage-dir /var/tmp/vvr-stage-manual
 ```
 
 Use an empty stage directory. The harness allocates a project `vvrst` plus six
-hex digits, bridges `br-vvr-s<suffix>a` and `br-vvr-s<suffix>e`, a free pair of
+hex digits, bridges `br-vvr-s<suffix>a`, `e`, `i` and `p`, four free
 `172.30.0.0/16` /24s outside the examples above, and a loopback port in
-20000-20899. It renders Compose and refuses the result if the app network is
+20000-20899. It will not reuse the retained `a41b73` stage. It renders Compose
+and refuses the result if the app network is
 not internal or if a capability, the host network, or the Docker socket
 appears. It does not mount production data, backups, or secrets.
 
@@ -117,10 +119,27 @@ open TCP to the proxy, or the published port does not answer, the harness
 stops there. That path does not call GitHub or OpenCode and does not install
 nft. The quiet fixture is not shortened below 310 seconds.
 
-The cloud VM bridge failure is unchanged. Docker 29.1.3 without user namespaces
-did not deliver frames between containers on the app bridge, and this revision
-did not rerun that probe. Docker 29.9.2 with dockremap is still untested. Do
-not treat the earlier failure as fixed.
+Docker programs a published port on the container's default-gateway network.
+An internal-only container has no gateway, so Docker 29.9.2 accepted the
+requested mapping and left `NetworkSettings.Ports` null. That is what the
+host observed for `127.0.0.1:20831`. The app stays on internal networks only.
+A separate socat process is the loopback publisher. It joins one internal
+network with the app and one ordinary network that exists so Docker has a
+gateway to publish `127.0.0.1`. It listens on one unprivileged port and
+connects only to `172.30.<octet>.10` on that same port. It is not attached to
+the proxy network. Its publish network has masquerade disabled. Once the
+scoped nft table is installed, new packets from that publish bridge are
+dropped and established replies are kept. The relay was not started on the
+host yet. The cloud VM bridge failure was not rerun and is not evidence about
+this host.
+
+The relay image uses the same Alpine digest as the proxy and `socat=1.8.1.3-r0`.
+It was not scanned. It runs as uid 65534, read-only, with every capability
+dropped. It has no secret, data, backup, or Docker socket mount. A compromised
+relay can still try to use the publish-network route until those nft rules
+exist, and it can open TCP to the single app address it is given. It cannot
+see the proxy allowlist path because it is not on that network. Allowed-API
+exfiltration from the app remains.
 
 Commands the harness uses and does not install: `timeout`, `flock`, `nft`,
 `openssl`, `docker`, `ss`, `ip`, `awk`, `curl`, and `od`.
@@ -153,15 +172,18 @@ running app until its queue has been drained on purpose.
 
    ```sh
    sudo valentinvera-reviewer-egress install \
-     --app-bridge br-vvr-app --egress-bridge br-vvr-egress
+     --app-bridge br-vvr-app --egress-bridge br-vvr-egress \
+     --publish-bridge br-vvr-publish
    sudo valentinvera-reviewer-egress status \
-     --app-bridge br-vvr-app --egress-bridge br-vvr-egress
+     --app-bridge br-vvr-app --egress-bridge br-vvr-egress \
+     --publish-bridge br-vvr-publish
    ```
 
 6. Recreate the app with `deploy/egress/compose.yml` and
-   `production.env.example`, still on `127.0.0.1:3000`, with the existing data,
-   backup and secret directories. Keep the backup mount writable. The backup
-   timer and the wrapper script stay as they are.
+   `production.env.example`, still published on `127.0.0.1:3000` by the
+   ingress relay, with the existing data, backup and secret directories. Keep
+   the backup mount writable. The backup timer and the wrapper script stay as
+   they are. This step is not authorized.
 
 `nftables.service` is disabled on the host and `netfilter-persistent` is not
 installed. Do not enable either. This unit loads only `inet reviewer_egress`.
@@ -179,8 +201,9 @@ seconds.
 
 The proxy image pin is unchanged: Alpine 3.22.1
 `sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1`
-and Squid 6.12-r0. This revision did not scan that image, so it is not marked
-safe here. The process is intended to run as uid 31, drop every capability,
+and Squid 6.12-r0. The ingress image uses that same Alpine digest and
+`socat=1.8.1.3-r0`. This revision did not scan either image, so neither is
+marked safe here. The process is intended to run as uid 31, drop every capability,
 and mount no secret, backup, data, or Docker socket. Squid would see the
 CONNECT hostname and the resolved address, not the TLS payload. The staging
 fixture listens on 8443 without an added capability. That exception is only in
