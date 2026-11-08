@@ -32,6 +32,11 @@ jobs:
           load: true
           push: false
           tags: valentinvera-reviewer:scan
+          # Required by the Dockerfile. A new value every run keeps the apt
+          # upgrade from being reused, including if this job later imports the
+          # deploy cache.
+          build-args: |
+            OS_SECURITY_REVISION=${{ github.run_id }}-${{ github.run_attempt }}
       - name: Scan image
         uses: aquasecurity/trivy-action@v0.36.0
         with:

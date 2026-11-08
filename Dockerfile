@@ -18,12 +18,26 @@ WORKDIR /app
 ENV NODE_ENV=production
 
 # The pinned base image ships outdated Debian packages. Apply security updates
-# before copying app files so this layer stays cached across source changes.
-# --with-new-pkgs installs new packages those updates require, without the
-# broader package replacements of dist-upgrade. Drop apt lists to keep the
-# layer small. Stay root for apt, then switch to the non-root bun user.
+# before copying app files. --with-new-pkgs installs packages those updates
+# require, without the broader replacements of dist-upgrade. Drop apt lists to
+# keep the layer small. Stay root for apt, then switch to the non-root bun user.
+#
+# BuildKit reuses a RUN layer while its command is unchanged, and the deploy
+# workflow restores that cache (mode=max). The upgrade would stay frozen, so
+# production would keep CVEs that a clean rebuild no longer has.
+# OS_SECURITY_REVISION is part of this layer's cache key and must change on
+# every build; the workflows pass the run id and attempt. An empty value fails
+# the build, so omitting it cannot reuse a stale upgrade. The deps stage does
+# not use this argument, so its install cache stays valid.
 USER root
-RUN apt-get update \
+ARG OS_SECURITY_REVISION
+RUN if [ -z "${OS_SECURITY_REVISION}" ]; then \
+      echo "OS_SECURITY_REVISION is required so the OS upgrade is not reused from cache." >&2; \
+      exit 1; \
+    fi \
+    && echo "os-security-revision=${OS_SECURITY_REVISION}" \
+    && export DEBIAN_FRONTEND=noninteractive \
+    && apt-get update \
     && apt-get upgrade -y --no-install-recommends --with-new-pkgs \
     && rm -rf /var/lib/apt/lists/*
 

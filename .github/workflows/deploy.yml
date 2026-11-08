@@ -49,6 +49,10 @@ jobs:
           tags: |
             ghcr.io/valentinvera/valentinvera-reviewer:${{ github.sha }}
             ghcr.io/valentinvera/valentinvera-reviewer:latest
+          # Required by the Dockerfile. Unique per run, so mode=max cannot
+          # restore a previous apt upgrade layer. The deps stage stays cached.
+          build-args: |
+            OS_SECURITY_REVISION=${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           labels: |
