@@ -1,3 +1,5 @@
+import net from "node:net"
+
 const mode = Bun.argv[2]
 const target = Bun.argv[3]
 const idleMs = Number(Bun.env.IDLE_MS ?? "310000")
@@ -61,6 +63,37 @@ if (mode === "direct") {
 if (mode === "dns") {
   const result = await Bun.dns.lookup(target)
   process.stdout.write(`${result[0]?.address ?? ""}\n`)
+  process.exit(0)
+}
+
+if (mode === "bind") {
+  await new Promise(() => {
+    const port = Number(Bun.argv[4])
+    const localPort = Number(Bun.argv[5])
+    const socket = net.connect({ host: target, port, localPort })
+    const timer = setTimeout(() => {
+      socket.destroy()
+      process.exit(1)
+    }, 3000)
+    socket.once("connect", () => {
+      clearTimeout(timer)
+      socket.destroy()
+      process.exit(0)
+    })
+    socket.once("error", (error) => {
+      clearTimeout(timer)
+      const code = error && error.code
+      if (
+        code === "EACCES" ||
+        code === "EPERM" ||
+        code === "EADDRINUSE" ||
+        code === "EADDRNOTAVAIL"
+      ) {
+        process.exit(3)
+      }
+      process.exit(1)
+    })
+  })
 }
 
 if (mode === "proxy-false") {

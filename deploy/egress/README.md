@@ -49,12 +49,20 @@ show that the network controls work.
   that does not arrive on one of the four stage bridges is left to the later
   chains.
 
-| Bridge  | To the host                                                           | New flow that stays allowed                                     | Reply                                                                      | Everything else on that bridge                             |
-| ------- | --------------------------------------------------------------------- | --------------------------------------------------------------- | -------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| App     | IPv6 dropped; established IPv4 kept; other IPv4 dropped               | TCP to the proxy on port 3128                                   | established, and a same-bridge reply from the proxy's source port 3128     | dropped, including IPv6                                    |
-| Ingress | IPv4 and IPv6 dropped, including an established session from the host | TCP from the relay `.2` to the app `.10` on the one listen port | established, and a same-bridge reply whose source port is that listen port | dropped, including a new session from the app to the relay |
-| Publish | IPv6 dropped; established IPv4 kept; other new IPv4 dropped           | none                                                            | established, and a same-bridge packet whose source port is the listen port | dropped, including IPv6                                    |
-| Egress  | IPv6 dropped; established IPv4 kept; other IPv4 dropped               | TCP port 443 after the bogon drop                               | established, and a same-bridge reply from source port 443                  | dropped, including IPv6                                    |
+| Bridge  | To the host                                                           | New flow that stays allowed                                                                                     | Reply                      | Everything else on that bridge                                                                 |
+| ------- | --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | -------------------------- | ---------------------------------------------------------------------------------------------- |
+| App     | IPv6 dropped; established IPv4 kept; other IPv4 dropped               | TCP to the proxy on port 3128                                                                                   | established conntrack only | dropped, including IPv6 and a new flow whose source port is 3128                               |
+| Ingress | IPv4 and IPv6 dropped, including an established session from the host | TCP from the relay `.2` to the app `.10` on the one listen port                                                 | established conntrack only | dropped, including a new session from the app to the relay and a new flow from the listen port |
+| Publish | IPv6 dropped; established IPv4 kept; other new IPv4 dropped           | none                                                                                                            | established conntrack only | dropped, including IPv6 and a new flow whose source port is the listen port                    |
+| Egress  | IPv6 dropped; established IPv4 kept; other IPv4 dropped               | TCP port 443 after the bogon drop. A stage install may also allow the exact fixture address on port 8443 first. | established conntrack only | dropped, including IPv6 and a new flow whose source port is 443                                |
+
+A source port does not prove an established reply. The bridge rules accept
+`ct state established,related` and the directional new flows above. They do
+not accept a new flow because it comes from port 3128, port 443, or the listen
+port. Production install does not pass the fixture address, so port 8443 is
+not allowed there. The fixture address is inside `172.16.0.0/12`, and the
+stage exception is placed before the bogon drop so the quiet oracle can still
+reach it after the rules are installed.
 
 The previous static check grepped the publish-bridge drop and the
 `--ingress-network` rollback filter. It did not require the ingress bridge to
@@ -116,7 +124,7 @@ sudo deploy/egress/host-stage.sh run --stage-dir /var/tmp/vvr-stage-manual
 Use an empty stage directory. The harness allocates a project `vvrst` plus six
 hex digits, bridges `br-vvr-s<suffix>a`, `e`, `i` and `p`, four free
 `172.30.0.0/16` /24s outside the examples above, and a loopback port in
-20000-20899. It will not reuse the retained `a41b73` stage. It renders Compose
+20000-20899. It will not reuse the retained `a41b73` or `e7b421` stages. It renders Compose
 and refuses the result if the app network is
 not internal or if a capability, the host network, or the Docker socket
 appears. It does not mount production data, backups, or secrets.
@@ -133,11 +141,23 @@ any nft table that was installed stay on the host. `host-stage.sh stop --plan
 a separate `host-rules.sh rollback --confirm-stopped` after those containers
 are stopped, and it refuses while one is still running.
 
-Worst case is about 25 minutes: up to 10 minutes to build the proxy image, the
-310 second quiet TLS fixture, and the shorter HTTPS checks. If the app cannot
-open TCP to the proxy, or the published port does not answer, the harness
-stops there. That path does not call GitHub or OpenCode and does not install
-nft. The quiet fixture is not shortened below 310 seconds.
+Worst case is about 30 minutes: up to 10 minutes to build the proxy image, two
+310 second quiet TLS fixtures, and the shorter HTTPS checks. The same quiet
+request runs before the rules and again after them. A success before the rules
+is not the post-rule result. If the app cannot open TCP to the proxy, or the
+published port does not answer, the harness stops there. That path does not
+call GitHub or OpenCode and does not install nft. The quiet fixture is not
+shortened below 310 seconds.
+
+After the rules are installed, the client binds local ports 3128 and 8080 and
+opens new TCP flows toward the proxy on 443, the relay, the fixture on 443,
+and a gateway. A completed handshake fails the stage. If 3128 or 8080 cannot
+be bound, the stage fails because that check was not exercised. Binding local
+port 443 is attempted as well. An unprivileged process cannot bind it, and
+that result is reported as not exercised. It is not counted as a pass. The
+client also looks up `example.com` and connects to `2001:db8::1`. An answer or
+a completed connection fails the stage. Those two checks are not a DNS, IPv6,
+Tailscale, or host INPUT matrix.
 
 Docker programs a published port on the container's default-gateway network.
 An internal-only container has no gateway, so Docker 29.9.2 accepted the
@@ -149,9 +169,10 @@ gateway to publish `127.0.0.1`. It listens on one unprivileged port and
 connects only to `172.30.<octet>.10` on that same port. It is not attached to
 the proxy network. Its publish network has masquerade disabled. Once the
 scoped nft table is installed, new packets from that publish bridge are
-dropped and established replies are kept. The relay was not started on the
-host yet. The cloud VM bridge failure was not rerun and is not evidence about
-this host.
+dropped and established replies are kept. The host has run this relay once,
+before these rules were installed. The post-rule loopback, the second quiet
+tunnel, and the source-port checks have not passed on the host. The cloud VM
+bridge failure was not rerun and is not evidence about this host.
 
 The relay image uses the same Alpine digest as the proxy and `socat=1.8.1.3-r0`.
 It was not scanned. It runs as uid 65534, read-only, with every capability
@@ -210,7 +231,8 @@ running app until its queue has been drained on purpose.
    they are. This step is not authorized.
 
 `nftables.service` is disabled on the host and `netfilter-persistent` is not
-installed. Do not enable either. This unit loads only `inet reviewer_egress`.
+installed. Do not enable either. This unit loads `inet reviewer_egress` and
+`bridge reviewer_egress`.
 Docker and Tailscale rewrites do not delete a separate nft table. A reboot
 does, unless the unit is enabled. Run `install` again after a Tailscale or
 Docker restart if `status` fails.
@@ -231,4 +253,9 @@ marked safe here. The process is intended to run as uid 31, drop every capabilit
 and mount no secret, backup, data, or Docker socket. Squid would see the
 CONNECT hostname and the resolved address, not the TLS payload. The staging
 fixture listens on 8443 without an added capability. That exception is only in
-a generated test config. The committed `squid.conf` still allows port 443 only.
+a generated test config and, for a stage table, in the rendered nft rules.
+The committed `squid.conf` still allows port 443 only. Bun's server idle
+timer cannot be set above 255 seconds, so the fixture disables its own idle
+timer. The client abort stays at the quiet interval plus 30 seconds, and the
+harness timeout stays at the quiet interval plus 40 seconds. Squid
+`read_timeout` stays 35 minutes. `AI_TIMEOUT_MS` is unchanged.

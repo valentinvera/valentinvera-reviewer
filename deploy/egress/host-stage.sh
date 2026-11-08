@@ -59,10 +59,12 @@ forbidden_value() {
   return 1
 }
 
-# The host still has the stopped a41b73 stage. Never allocate it again.
+# Stopped stages stay on the host. Never allocate them again, even when
+# inventory misses a name, subnet, or port.
 reserved_value() {
   case "$1" in
-    a41b73|sa41b73|vvrsta41b73|vvrsta41b73a|vvrsta41b73e|br-vvr-sa41b73a|br-vvr-sa41b73e|reviewer_egress_sa41b73|172.30.149.0/24|172.30.150.0/24|20831)
+    a41b73|sa41b73|vvrsta41b73|vvrsta41b73a|vvrsta41b73e|br-vvr-sa41b73a|br-vvr-sa41b73e|reviewer_egress_sa41b73|172.30.149.0/24|172.30.150.0/24|20831|\
+    e7b421|se7b421|vvrste7b421|vvrste7b421a|vvrste7b421e|vvrste7b421i|vvrste7b421p|br-vvr-se7b421a|br-vvr-se7b421e|br-vvr-se7b421i|br-vvr-se7b421p|reviewer_egress_se7b421|172.30.167.0/24|172.30.168.0/24|172.30.169.0/24|172.30.170.0/24|20129)
       return 0
       ;;
   esac
@@ -546,14 +548,38 @@ EOF
   client_exec 25 https "https://opencode.ai/" >/dev/null || stage_fail "opencode.ai"
   client_exec 20 https "https://example.com/" && stage_fail "example.com was allowed"
   client_exec 20 https "https://idle.fixture:8443/" | grep -q '^200 ' || stage_fail "fixture handshake"
-  printf '%s\n' "$((idle_seconds * 1000))" > "$stage_dir/delay/ms"
-  start=$(date +%s)
-  timeout $((idle_seconds + 40)) "$docker_cmd" exec "$client_id" bun /opt/client.js idle "https://idle.fixture:8443/slow" | grep -q 'slow-ok' || stage_fail "quiet tunnel"
-  elapsed=$(( $(date +%s) - start ))
-  if [ "$elapsed" -lt "$idle_seconds" ]; then
-    stage_fail "quiet tunnel ended early"
-  fi
-  printf '0\n' > "$stage_dir/delay/ms"
+  quiet_tunnel() {
+    label=$1
+    printf '%s\n' "$((idle_seconds * 1000))" > "$stage_dir/delay/ms"
+    start=$(date +%s)
+    timeout $((idle_seconds + 40)) "$docker_cmd" exec "$client_id" bun /opt/client.js idle "https://idle.fixture:8443/slow" | grep -q 'slow-ok' || stage_fail "$label"
+    elapsed=$(( $(date +%s) - start ))
+    if [ "$elapsed" -lt "$idle_seconds" ]; then
+      stage_fail "$label ended early"
+    fi
+    printf '0\n' > "$stage_dir/delay/ms"
+    echo "$label ${elapsed}s"
+  }
+  bound_flow() {
+    code=0
+    timeout 8 "$docker_cmd" exec "$client_id" bun /opt/client.js bind "$1" "$2" "$3" || code=$?
+    if [ "$code" -eq 0 ]; then
+      if [ "$4" = "allow" ]; then
+        return 0
+      fi
+      stage_fail "new flow from local port $3 to $1:$2 was accepted"
+    fi
+    if [ "$4" = "allow" ]; then
+      stage_fail "allowed flow from local port $3 to $1:$2 exited $code"
+    fi
+    if [ "$code" -eq 3 ]; then
+      stage_fail "could not bind local port $3, so $1:$2 was not exercised"
+    fi
+    if [ "$code" -ne 1 ]; then
+      stage_fail "bind check from local port $3 to $1:$2 exited $code"
+    fi
+  }
+  quiet_tunnel "quiet tunnel before nft"
   timeout 30 "$root/host-rules.sh" install \
     --table "$(plan_get TABLE)" \
     --app-bridge "$(plan_get APP_BRIDGE)" \
@@ -564,6 +590,8 @@ EOF
     --ingress-relay "$(plan_get INGRESS_RELAY_IP)" \
     --ingress-upstream "$(plan_get INGRESS_UPSTREAM_IP)" \
     --ingress-port 8080 \
+    --fixture-ip "$(plan_get FIXTURE_IP)" \
+    --fixture-port 8443 \
     --app-network "$(plan_get APP_NETWORK)" \
     --egress-network "$(plan_get EGRESS_NETWORK)" \
     --ingress-network "$(plan_get INGRESS_NETWORK)" \
@@ -573,9 +601,40 @@ EOF
   fi
   client_exec 25 https "https://api.github.com/" | grep -q '^200 ' || stage_fail "proxy path failed after nft"
   client_exec 12 proxy-false "https://api.github.com/" && stage_fail "direct path stayed open"
+  bound_flow "$(plan_get PROXY_IP)" 3128 3128 allow
+  bound_flow "$(plan_get PROXY_IP)" 443 3128 deny
+  bound_flow "$(plan_get INGRESS_RELAY_IP)" 8080 8080 deny
+  bound_flow "$(plan_get INGRESS_GATEWAY)" 443 8080 deny
+  bound_flow "$(plan_get FIXTURE_IP)" 443 3128 deny
+  code=0
+  timeout 8 "$docker_cmd" exec "$client_id" bun /opt/client.js bind "$(plan_get INGRESS_GATEWAY)" 443 443 || code=$?
+  if [ "$code" -eq 0 ]; then
+    stage_fail "source port 443 opened a new flow"
+  fi
+  if [ "$code" -eq 1 ]; then
+    echo "source port 443 was bindable and the new flow was denied"
+  elif [ "$code" -eq 3 ]; then
+    echo "source port 443 could not be bound without privilege; that runtime check was not exercised"
+  else
+    stage_fail "source port 443 check exited $code"
+  fi
+  code=0
+  dns_out=$(timeout 8 "$docker_cmd" exec "$client_id" bun /opt/client.js dns example.com) || code=$?
+  if [ "$code" -eq 0 ]; then
+    stage_fail "example.com resolved after nft: ${dns_out}"
+  fi
+  if [ "$code" -eq 124 ]; then
+    stage_fail "dns check did not finish"
+  fi
+  code=0
+  timeout 8 "$docker_cmd" exec "$client_id" bun /opt/client.js direct 2001:db8::1 443 || code=$?
+  if [ "$code" -ne 1 ]; then
+    stage_fail "ipv6 check exited $code"
+  fi
+  quiet_tunnel "quiet tunnel after nft"
   print_inventory
-  echo "quiet tunnel ${elapsed}s"
   echo "containers and inet $(plan_get TABLE) were left in place"
+  echo "a quiet result before nft is not the post-rule result"
   echo "stop containers only: $root/host-stage.sh stop --plan $plan_file"
 }
 

@@ -72,6 +72,9 @@ grep -q '^PORT=3000$' "$work/ok.plan" && fail "plan used port 3000"
 grep -q '^PORT=20831$' "$work/ok.plan" && fail "plan reused the retained port"
 "$root/host-stage.sh" plan --inventory "$work/empty-inventory" --suffix a41b73 --plan "$work/retained.plan" --stage-dir "$work" >/dev/null 2>"$work/retained.err" && fail "retained stage was planned"
 grep -q 'refusing retained stage' "$work/retained.err" || fail "retained stage refusal missing"
+"$root/host-stage.sh" plan --inventory "$work/empty-inventory" --suffix e7b421 --plan "$work/retained-e7.plan" --stage-dir "$work" >/dev/null 2>"$work/retained-e7.err" && fail "retained e7b421 stage was planned"
+grep -q 'refusing retained stage' "$work/retained-e7.err" || fail "retained e7b421 refusal missing"
+grep -q '^PORT=20129$' "$work/ok.plan" && fail "plan reused the retained e7b421 port"
 "$root/host-stage.sh" preflight --inventory "$work/empty-inventory" --plan "$work/ok.plan" >/dev/null
 "$root/host-stage.sh" preflight --inventory "$work/inventory" --plan "$work/ok.plan" >/dev/null 2>"$work/preflight.err" && fail "preflight replaced an existing bridge"
 grep -q 'refusing to replace' "$work/preflight.err" || fail "preflight did not refuse"
@@ -143,8 +146,8 @@ required = [
     'iifname "{0}" ip saddr 172.30.145.2 ip daddr 172.30.145.10 tcp dport 8080 ct state new counter accept'.format(ingress),
     f'iifname "{ingress}" counter drop',
     f'meta ibrname "{ingress}" ether type ip6 counter drop',
+    f'meta ibrname "{ingress}" ether type ip ct state established,related counter accept',
     f'meta ibrname "{ingress}" ether type ip ip saddr 172.30.145.2 ip daddr 172.30.145.10 tcp dport 8080 counter accept',
-    f'meta ibrname "{ingress}" ether type ip ip saddr 172.30.145.10 tcp sport 8080 ip daddr 172.30.145.2 counter accept',
     f'meta ibrname "{ingress}" ether type ip counter drop',
     'iifname "br-vvr-sabcdefa" ip daddr 172.30.143.2 tcp dport 3128 counter accept',
     'iifname "br-vvr-sabcdefp" counter drop',
@@ -153,10 +156,14 @@ required = [
 for line in required:
     if line not in rules:
         raise SystemExit("missing: " + line)
-# The app must not be given a new session to the relay. A reply keeps source port 8080.
+# The app must not be given a new session to the relay.
 forbidden = 'ip saddr 172.30.145.10 ip daddr 172.30.145.2 tcp dport 8080'
 if forbidden in rules:
     raise SystemExit("app to relay new session is accepted")
+if "tcp sport" in rules:
+    raise SystemExit("a source port is accepted")
+if "8443" in rules:
+    raise SystemExit("rules without a fixture flag include port 8443")
 if 'iifname "br-vvr-sabcdefp" tcp dport' in rules:
     raise SystemExit("publish bridge allows a new destination")
 # Ingress input drops before any accept of that interface in the input chain.
@@ -172,7 +179,57 @@ allowed = forward.find("tcp dport 8080 ct state new counter accept")
 dropped = forward.rfind('iifname "%s" counter drop' % ingress)
 if not (0 <= established < allowed < dropped):
     raise SystemExit("ingress forward does not drop after the one allowed flow")
+bridge = rules.split("table bridge reviewer_egress_sabcdef {", 1)[1]
+if "table inet " in bridge:
+    bridge = bridge.split("table inet ", 1)[0]
+bforward = bridge.split("chain forward", 1)[1]
+bestablished = bforward.find('meta ibrname "%s" ether type ip ct state established,related counter accept' % ingress)
+ballowed = bforward.find("ip saddr 172.30.145.2 ip daddr 172.30.145.10 tcp dport 8080")
+bdropped = bforward.rfind('meta ibrname "%s" ether type ip counter drop' % ingress)
+if not (0 <= bestablished < ballowed < bdropped):
+    raise SystemExit("bridge ingress forward does not drop after the one allowed flow")
+binput = bridge.split("chain forward", 1)[0]
+binput_lines = [line.strip() for line in binput.splitlines() if ingress in line and "counter" in line]
+if any("accept" in line for line in binput_lines):
+    raise SystemExit("bridge ingress input accepts traffic: " + repr(binput_lines))
 PY
+: > "$NFT_LOG"
+# shellcheck disable=SC2086
+"$root/host-rules.sh" install $rules_args --fixture-ip 172.30.144.10 --fixture-port 8443 >/dev/null
+grep -q 'ip daddr 172.30.144.10 tcp dport 8443 counter accept' "$NFT_LOG" || fail "stage fixture exception missing"
+if grep -q 'tcp sport' "$NFT_LOG"; then
+  fail "fixture rules accept a source port"
+fi
+: > "$NFT_LOG"
+"$root/host-rules.sh" install \
+  --table reviewer_egress \
+  --app-bridge br-vvr-app \
+  --egress-bridge br-vvr-egress \
+  --ingress-bridge br-vvr-ingress \
+  --publish-bridge br-vvr-publish \
+  --proxy-ip 172.30.208.2 \
+  --ingress-relay 172.30.219.2 \
+  --ingress-upstream 172.30.219.10 \
+  --ingress-port 3000 \
+  --fixture-ip 172.30.144.10 \
+  --fixture-port 8443 >/dev/null 2>"$work/fixture-prod.err" && fail "production table accepted a fixture"
+grep -q 'refusing fixture exception outside a stage table' "$work/fixture-prod.err" || fail "fixture refusal missing"
+if grep -q '^-f ' "$NFT_LOG"; then
+  fail "refused fixture still rendered nft"
+fi
+: > "$NFT_LOG"
+# shellcheck disable=SC2086
+"$root/host-rules.sh" install $rules_args --fixture-ip 172.30.144.10 --fixture-port 443 >/dev/null 2>"$work/fixture-port.err" && fail "fixture port 443 was accepted"
+grep -q 'refusing fixture port' "$work/fixture-port.err" || fail "fixture port refusal missing"
+if grep -q '8443\|fixture-ip' "$root/valentinvera-reviewer-egress.service"; then
+  fail "production unit includes the fixture"
+fi
+if ! grep -q 'quiet tunnel after nft' "$root/host-stage.sh"; then
+  fail "quiet tunnel is not repeated after nft"
+fi
+if ! grep -q 'bound_flow' "$root/host-stage.sh"; then
+  fail "source-port flows are not exercised"
+fi
 : > "$NFT_LOG"
 "$root/host-rules.sh" install \
   --table reviewer_egress_sabcdef \
@@ -459,6 +516,66 @@ if grep -q 'subnet' "$work/fail.inv" && grep -q 'broken' "$work/fail.inv"; then
     fail "failed inspect invented a subnet"
   fi
 fi
+
+echo "== fixture idle deadline"
+grep -q 'idleTimeout: 0' "$root/testdata/fixture.js" || fail "fixture still uses Bun's 10s idle default"
+if grep -q 'idleTimeout: 10' "$root/testdata/fixture.js"; then
+  fail "fixture sets the 10s idle deadline"
+fi
+grep -q 'timeout: false' "$root/testdata/client.js" || fail "client idle fetch enables Bun's socket idle timer"
+grep -q 'idleMs + 30_000' "$root/testdata/client.js" || fail "client idle abort is not above the quiet interval"
+command -v bun >/dev/null 2>&1 || fail "bun is required to prove the fixture stays quiet past 10s"
+command -v openssl >/dev/null 2>&1 || fail "openssl is required for the fixture certificate"
+idle_dir="$work/idle-fixture"
+mkdir -p "$idle_dir"
+openssl req -x509 -newkey rsa:2048 -keyout "$idle_dir/srv.key" -out "$idle_dir/srv.crt" -days 1 -nodes -subj /CN=idle.fixture >/dev/null 2>&1
+printf '12000\n' > "$idle_dir/delay-ms"
+idle_port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
+cat > "$idle_dir/fetch.js" <<'EOF'
+const response = await fetch(Bun.argv[2], {
+  signal: AbortSignal.timeout(20_000),
+  timeout: false,
+  tls: { rejectUnauthorized: false },
+})
+process.stdout.write(await response.text())
+EOF
+FIXTURE_CERT="$idle_dir/srv.crt" FIXTURE_KEY="$idle_dir/srv.key" FIXTURE_DELAY="$idle_dir/delay-ms" FIXTURE_PORT="$idle_port" \
+  bun "$root/testdata/fixture.js" >"$idle_dir/server.log" 2>&1 &
+idle_pid=$!
+ready=0
+n=0
+while [ "$n" -lt 50 ]; do
+  if FIXTURE_PORT="$idle_port" bun -e 'const r = await fetch("https://127.0.0.1:" + process.env.FIXTURE_PORT + "/", { tls: { rejectUnauthorized: false }, signal: AbortSignal.timeout(1000) }); process.exit((await r.text()) === "ok" ? 0 : 1)' >/dev/null 2>&1; then
+    ready=1
+    break
+  fi
+  n=$((n + 1))
+  sleep 0.1
+done
+if [ "$ready" -ne 1 ]; then
+  kill "$idle_pid" 2>/dev/null || true
+  wait "$idle_pid" 2>/dev/null || true
+  cat "$idle_dir/server.log" >&2 || true
+  fail "fixture did not accept a connection"
+fi
+idle_start=$(date +%s)
+if ! bun "$idle_dir/fetch.js" "https://127.0.0.1:${idle_port}/slow" >"$idle_dir/body" 2>"$idle_dir/fetch.err"; then
+  kill "$idle_pid" 2>/dev/null || true
+  wait "$idle_pid" 2>/dev/null || true
+  cat "$idle_dir/server.log" "$idle_dir/fetch.err" >&2 || true
+  fail "fixture quiet request failed"
+fi
+idle_elapsed=$(( $(date +%s) - idle_start ))
+kill "$idle_pid" 2>/dev/null || true
+wait "$idle_pid" 2>/dev/null || true
+grep -q 'slow-ok' "$idle_dir/body" || fail "fixture quiet body was not slow-ok"
+if [ "$idle_elapsed" -le 10 ]; then
+  fail "fixture quiet request ended in ${idle_elapsed}s, which does not beat the 10s default"
+fi
+if grep -q 'timed out a request after 10 seconds' "$idle_dir/server.log"; then
+  fail "fixture logged Bun's 10s idle timeout"
+fi
+echo "fixture stayed quiet ${idle_elapsed}s; the 310s host proof was not run"
 
 echo "static checks passed; live transport was not run"
 echo "work directory retained at $keep"

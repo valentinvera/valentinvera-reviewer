@@ -14,6 +14,8 @@ ingress_bridge=""
 ingress_relay=""
 ingress_upstream=""
 ingress_port=""
+fixture_ip=""
+fixture_port=""
 app_network=""
 egress_network=""
 ingress_network=""
@@ -26,7 +28,7 @@ docker_cmd="${EGRESS_DOCKER:-docker}"
 lock_dir="${EGRESS_LOCK_DIR:-/run/lock}"
 
 usage() {
-  echo "usage: host-rules.sh {install|status|rollback} [--table NAME] [--app-bridge IF] [--egress-bridge IF] [--ingress-bridge IF] [--publish-bridge IF] [--proxy-ip ADDR] [--ingress-relay ADDR] [--ingress-upstream ADDR] [--ingress-port PORT] [--app-network NAME] [--egress-network NAME] [--ingress-network NAME] [--publish-network NAME] [--if-bridges-present] [--confirm-stopped]" >&2
+  echo "usage: host-rules.sh {install|status|rollback} [--table NAME] [--app-bridge IF] [--egress-bridge IF] [--ingress-bridge IF] [--publish-bridge IF] [--proxy-ip ADDR] [--ingress-relay ADDR] [--ingress-upstream ADDR] [--ingress-port PORT] [--fixture-ip ADDR] [--fixture-port PORT] [--app-network NAME] [--egress-network NAME] [--ingress-network NAME] [--publish-network NAME] [--if-bridges-present] [--confirm-stopped]" >&2
   exit 1
 }
 
@@ -41,6 +43,8 @@ while [ $# -gt 0 ]; do
     --ingress-relay) ingress_relay="$2"; shift 2 ;;
     --ingress-upstream) ingress_upstream="$2"; shift 2 ;;
     --ingress-port) ingress_port="$2"; shift 2 ;;
+    --fixture-ip) fixture_ip="$2"; shift 2 ;;
+    --fixture-port) fixture_port="$2"; shift 2 ;;
     --proxy-ip) proxy_ip="$2"; shift 2 ;;
     --app-network) app_network="$2"; shift 2 ;;
     --egress-network) egress_network="$2"; shift 2 ;;
@@ -177,6 +181,29 @@ case "${app_bridge}:${proxy_ip}" in
   *) echo "refusing proxy $proxy_ip on $app_bridge" >&2; exit 1 ;;
 esac
 
+fixture_inet=""
+fixture_bridge=""
+if [ -n "$fixture_ip" ] || [ -n "$fixture_port" ]; then
+  if [ -z "$fixture_ip" ] || [ -z "$fixture_port" ]; then
+    echo "fixture address and port are both required" >&2
+    exit 1
+  fi
+  if [ "$fixture_port" != "8443" ]; then
+    echo "refusing fixture port $fixture_port" >&2
+    exit 1
+  fi
+  stage_name "$table" '^reviewer_egress_s[0-9a-f]{6}$' || {
+    echo "refusing fixture exception outside a stage table" >&2
+    exit 1
+  }
+  printf '%s\n' "$fixture_ip" | awk -F. 'BEGIN { ok=0 } $1==172 && $2==30 && $4==10 && $3+0>=128 && $3+0<=251 && $3+0!=208 && $3+0!=209 && $3+0!=210 && $3+0!=216 && $3+0!=217 && $3+0!=218 { ok=1 } END { exit ok ? 0 : 1 }' || {
+    echo "refusing fixture $fixture_ip" >&2
+    exit 1
+  }
+  fixture_inet="    iifname \"${egress_bridge}\" ip daddr ${fixture_ip} tcp dport ${fixture_port} counter accept"
+  fixture_bridge="    meta ibrname \"${egress_bridge}\" ether type ip ip daddr ${fixture_ip} tcp dport ${fixture_port} counter accept"
+fi
+
 bridge_present() {
   "${EGRESS_IP:-ip}" link show "$1" >/dev/null 2>&1
 }
@@ -238,6 +265,7 @@ table inet ${table} {
     iifname "${app_bridge}" ip daddr ${proxy_ip} tcp dport 3128 counter accept
     iifname "${app_bridge}" counter drop
     iifname "${egress_bridge}" ct state established,related counter accept
+${fixture_inet}
     iifname "${egress_bridge}" ip daddr @bogon4 counter drop
     iifname "${egress_bridge}" tcp dport 443 counter accept
     iifname "${egress_bridge}" counter drop
@@ -256,7 +284,11 @@ table bridge ${table} {
     meta ibrname "${egress_bridge}" ether type ip6 counter drop
     meta ibrname "${publish_bridge}" ether type ip6 counter drop
     meta ibrname "${ingress_bridge}" ether type ip6 counter drop
-    meta ibrname "${publish_bridge}" ether type ip tcp sport ${ingress_port} counter accept
+    meta ibrname "${app_bridge}" ether type ip ct state established,related counter accept
+    meta ibrname "${app_bridge}" ether type ip counter drop
+    meta ibrname "${egress_bridge}" ether type ip ct state established,related counter accept
+    meta ibrname "${egress_bridge}" ether type ip counter drop
+    meta ibrname "${publish_bridge}" ether type ip ct state established,related counter accept
     meta ibrname "${publish_bridge}" ether type ip counter drop
     meta ibrname "${ingress_bridge}" ether type ip counter drop
   }
@@ -267,15 +299,17 @@ table bridge ${table} {
     meta ibrname "${egress_bridge}" ether type ip6 counter drop
     meta ibrname "${publish_bridge}" ether type ip6 counter drop
     meta ibrname "${ingress_bridge}" ether type ip6 counter drop
+    meta ibrname "${app_bridge}" ether type ip ct state established,related counter accept
     meta ibrname "${app_bridge}" ether type ip ip daddr ${proxy_ip} tcp dport 3128 counter accept
-    meta ibrname "${app_bridge}" ether type ip ip saddr ${proxy_ip} tcp sport 3128 counter accept
     meta ibrname "${app_bridge}" ether type ip counter drop
+    meta ibrname "${egress_bridge}" ether type ip ct state established,related counter accept
+${fixture_bridge}
     meta ibrname "${egress_bridge}" ether type ip tcp dport 443 counter accept
-    meta ibrname "${egress_bridge}" ether type ip tcp sport 443 counter accept
     meta ibrname "${egress_bridge}" ether type ip counter drop
+    meta ibrname "${publish_bridge}" ether type ip ct state established,related counter accept
     meta ibrname "${publish_bridge}" ether type ip counter drop
+    meta ibrname "${ingress_bridge}" ether type ip ct state established,related counter accept
     meta ibrname "${ingress_bridge}" ether type ip ip saddr ${ingress_relay} ip daddr ${ingress_upstream} tcp dport ${ingress_port} counter accept
-    meta ibrname "${ingress_bridge}" ether type ip ip saddr ${ingress_upstream} tcp sport ${ingress_port} ip daddr ${ingress_relay} counter accept
     meta ibrname "${ingress_bridge}" ether type ip counter drop
   }
 }
@@ -334,12 +368,22 @@ status_rules() {
   timeout 15 "$nft_cmd" list table inet "$table" >/dev/null
   timeout 15 "$nft_cmd" list table bridge "$table" >/dev/null
   listed=$(timeout 15 "$nft_cmd" list table inet "$table"; timeout 15 "$nft_cmd" list table bridge "$table")
-  for needle in "$app_bridge" "$ingress_bridge" "$egress_bridge" "$publish_bridge" "$proxy_ip" "$ingress_relay" "$ingress_upstream" "tcp dport ${ingress_port}" "tcp dport 3128" "tcp dport 443" "100.64.0.0/10" "169.254.0.0/16" "meta nfproto ipv6" "ether type ip6"; do
+  for needle in "$app_bridge" "$ingress_bridge" "$egress_bridge" "$publish_bridge" "$proxy_ip" "$ingress_relay" "$ingress_upstream" "tcp dport ${ingress_port}" "tcp dport 3128" "tcp dport 443" "100.64.0.0/10" "169.254.0.0/16" "meta nfproto ipv6" "ether type ip6" "ct state established,related"; do
     if ! printf '%s\n' "$listed" | grep -q -F "$needle"; then
       echo "table ${table} is missing ${needle}" >&2
       exit 1
     fi
   done
+  if [ -n "$fixture_ip" ]; then
+    if ! printf '%s\n' "$listed" | grep -q -F "ip daddr ${fixture_ip} tcp dport ${fixture_port}"; then
+      echo "table ${table} is missing the stage fixture" >&2
+      exit 1
+    fi
+  fi
+  if printf '%s\n' "$listed" | grep -q -F 'tcp sport'; then
+    echo "table ${table} accepts a flow by source port" >&2
+    exit 1
+  fi
   echo "ok inet ${table}"
 }
 
