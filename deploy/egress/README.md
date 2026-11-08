@@ -174,8 +174,12 @@ proxy, and port 8080 on the ingress address the health listener uses. The
 address is read only after the datagram socket finishes connecting. The health
 listener is asked to release port 8080 and is restored afterward; loopback
 health has to answer again. Source port 8080 must first complete a handshake
-to a listener on that same address. A route inside the client namespace sends
-the fixture address to the proxy MAC so the numeric TCP and the
+to a listener on that same address. `stage-route.sh` opens the stage client's
+Docker netns file, checks the container id, compose project, service, name,
+running state, and cgroup, and refuses the host namespace, the caller's
+namespace, and any sandbox shared with another container. It enters only that
+pinned descriptor. It does not pass a process id to `nsenter`. The route is
+one /32 for the fixture address via the proxy, so the numeric TCP and the
 `proxy: false` TLS fetch are real packets. They count only when the app-bridge
 drop moves. The proxied fixture request has to return 200 first, with the
 fixture name as SNI on the direct attempt. DNS failure is a separate case.

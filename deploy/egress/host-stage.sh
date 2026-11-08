@@ -755,10 +755,18 @@ EOF
   else
     record_case direct-tcp-proxy443 NOT-EXERCISED "exit ${run_code} counter ${before}->${after} $(err_detail)"
   fi
-  client_pid=$("$docker_cmd" inspect "$client_id" --format '{{.State.Pid}}')
-  if ! nsenter -t "$client_pid" -n ip route replace "$(plan_get FIXTURE_IP)/32" via "$(plan_get PROXY_IP)"; then
-    record_case direct-tcp-fixture-ip NOT-EXERCISED "could not add the container route to the fixture address"
-    record_case proxy-false-fixture NOT-EXERCISED "could not add the container route to the fixture address"
+  if ! "$root/stage-route.sh" \
+    --docker "$docker_cmd" \
+    --container "$client_id" \
+    --project "$(plan_get PROJECT)" \
+    --service client \
+    --dest "$(plan_get FIXTURE_IP)" \
+    --via "$(plan_get PROXY_IP)" \
+    >"$stage_dir/route.out" 2>"$stage_dir/route.err"
+  then
+    route_detail=$(tr '\n' ' ' < "$stage_dir/route.err" | awk '{ print substr($0, 1, 180) }')
+    record_case direct-tcp-fixture-ip NOT-EXERCISED "stage route was not installed: ${route_detail}"
+    record_case proxy-false-fixture NOT-EXERCISED "stage route was not installed: ${route_detail}"
   else
     before=$(nft_packets bridge forward "meta ibrname \"$(plan_get APP_BRIDGE)\" ether type ip counter") || before=""
     run_in "$client_id" 8 direct "$(plan_get FIXTURE_IP)" 8443

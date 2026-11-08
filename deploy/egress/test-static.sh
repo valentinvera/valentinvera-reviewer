@@ -14,7 +14,7 @@ fail() {
 }
 
 echo "== syntax"
-for script in render-squid-conf.sh proxy-entrypoint.sh app-entrypoint.sh ingress-entrypoint.sh host-rules.sh stage-perms.sh host-stage.sh pack-bundle.sh; do
+for script in render-squid-conf.sh proxy-entrypoint.sh app-entrypoint.sh ingress-entrypoint.sh host-rules.sh stage-perms.sh host-stage.sh stage-route.sh pack-bundle.sh; do
   sh -n "$root/$script"
 done
 
@@ -280,6 +280,17 @@ fi
 if grep -q 'proxy-false "https://api.github.com/' "$root/host-stage.sh"; then
   fail "direct fetch still depends on GitHub DNS"
 fi
+if grep -n -E 'nsenter[[:space:]]+-t|nsenter[[:space:]]+--target' "$root/host-stage.sh" "$root/stage-route.sh" >/dev/null; then
+  fail "a namespace is entered by pid"
+fi
+if grep -n 'nsenter' "$root/host-stage.sh" >/dev/null; then
+  fail "host-stage enters a namespace itself"
+fi
+if grep -n 'allow-fixture-prefix' "$root/host-stage.sh" >/dev/null; then
+  fail "the host harness enables the fixture namespace prefix"
+fi
+grep -q 'stage-route.sh' "$root/host-stage.sh" || fail "the stage route helper is not used"
+grep -q -- '--net=/proc/self/fd/' "$root/stage-route.sh" || fail "the route helper does not enter a pinned descriptor"
 for label in sport8080-proof sport8080-relay direct-tcp-proxy443 proxy-false-fixture dns-udp-127.0.0.11 dns-tcp-sink dns-udp-external dns-host-gateway host-local-443 udp-quic-443 private-10 metadata-link-local cgnat-tailscale-range ipv6-disabled redirect cold-neighbor post-rule-opencode proxy-down relay-egress; do
   grep -q "$label" "$root/host-stage.sh" || fail "missing case $label"
 done
@@ -757,6 +768,9 @@ printf '%s' "$tcp_refused" | grep -q 'NOANSWER rcode=5' || fail "tcp example.com
 grep -F -q -x canary.stage.test "$dns_log" || fail "canary query was not logged"
 grep -F -q -x example.com "$dns_log" || fail "example.com query was not logged"
 echo "dns sink answered the canary and refused example.com"
+
+echo "== pinned stage route"
+"$root/test-stage-route.sh" "$root"
 
 echo "static checks passed; live transport was not run"
 echo "work directory retained at $keep"
