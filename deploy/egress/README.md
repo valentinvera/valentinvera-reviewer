@@ -15,8 +15,8 @@ bridge also received nothing. Published ports on that internal network stayed
 unset. GitHub, OpenCode, the long quiet tunnel, and containment were not
 reached. Do not activate this on production from that result.
 
-This directory does not deploy the production host. Apply it only after
-`deploy/egress/test-egress.sh` passes on the separate staging project.
+This directory does not deploy the production host. The static checks do not
+show that the network controls work.
 
 ## What is enforced
 
@@ -81,18 +81,54 @@ profile. Suggested host values:
 | Egress bridge | `br-vvr-stge`             | `br-vvr-cie`         | `br-vvr-egress`         |
 | nft table     | `reviewer_egress_staging` | `reviewer_egress_ci` | `reviewer_egress`       |
 
-`deploy/egress/test-egress.sh` builds the proxy and then requires TCP from the
-app container to the proxy and a published loopback health check before any
-allow, deny, or idle assertion. On the cloud VM those two checks failed, so
-the script stopped. It never uses the production bridge names. A passing run
-would hold a local TLS tunnel with no bytes for at least 310 seconds and
-install only the CI table.
+The names in the table above are examples. The host harness does not reuse a
+name, subnet, bridge, port, or nft table that already exists, including those
+examples and the production bridge `br-f5d584fd553b`.
+
+`deploy/egress/test-egress.sh` only runs secret-free static checks. It does
+not start containers. The host command is:
+
+```sh
+sudo deploy/egress/host-stage.sh run --stage-dir /var/tmp/vvr-stage-manual
+```
+
+Use an empty stage directory. The harness allocates a project `vvrst` plus six
+hex digits, bridges `br-vvr-s<suffix>a` and `br-vvr-s<suffix>e`, a free pair of
+`172.30.0.0/16` /24s outside the examples above, and a loopback port in
+20000-20899. It renders Compose and refuses the result if the app network is
+not internal or if a capability, the host network, or the Docker socket
+appears. It does not mount production data, backups, or secrets.
+
+It stops before creating those resources when any planned name is already
+present. On a later failure it runs `docker compose stop` and prints the
+inventory. It does not run `docker compose down`, `docker rm`, `docker run
+--rm`, or nft rollback. Stopped containers, networks, the stage directory, and
+any nft table that was installed stay on the host. `host-stage.sh stop --plan
+<stage>/plan` stops containers and leaves the nft table in place. Rollback is
+a separate `host-rules.sh rollback --confirm-stopped` after those containers
+are stopped, and it refuses while one is still running.
+
+Worst case is about 25 minutes: up to 10 minutes to build the proxy image, the
+310 second quiet TLS fixture, and the shorter HTTPS checks. If the app cannot
+open TCP to the proxy, or the published port does not answer, the harness
+stops there. That path does not call GitHub or OpenCode and does not install
+nft. The quiet fixture is not shortened below 310 seconds.
+
+The cloud VM bridge failure is unchanged. Docker 29.1.3 without user namespaces
+did not deliver frames between containers on the app bridge, and this revision
+did not rerun that probe. Docker 29.9.2 with dockremap is still untested. Do
+not treat the earlier failure as fixed.
+
+Commands the harness uses and does not install: `timeout`, `flock`, `nft`,
+`openssl`, `docker`, `ss`, `ip`, `awk`, `curl`, and `od`.
 
 ## Host activation
 
-Do this after staging has passed. Do not flush filter tables, restart Docker,
-restart Tailscale, or recreate the running app until its queue has been drained
-on purpose.
+Not authorized. `host-stage.sh` does not install the systemd unit, does not
+copy files to `/usr/local/sbin`, and does not recreate the production app.
+The steps below stay here so a later activation is not improvised. Do not
+flush filter tables, restart Docker, restart Tailscale, or recreate the
+running app until its queue has been drained on purpose.
 
 1. Build and tag the proxy image from `deploy/egress`.
 2. Copy `host-rules.sh` to `/usr/local/sbin/valentinvera-reviewer-egress` and
@@ -130,12 +166,19 @@ Docker and Tailscale rewrites do not delete a separate nft table. A reboot
 does, unless the unit is enabled. Run `install` again after a Tailscale or
 Docker restart if `status` fails.
 
-Rollback is `valentinvera-reviewer-egress rollback`. It deletes that one table.
-It does not run `nft flush ruleset` or `iptables-restore`.
+Rollback is `host-rules.sh rollback --confirm-stopped` for one named table.
+It refuses while a container is still running on the staged networks, and it
+does not run `nft flush ruleset` or `iptables-restore`. `install` refuses when
+that table already exists instead of deleting it first. The lock wait is 15
+seconds.
 
 ## Proxy image
 
-The proxy image is Alpine 3.22.1 with Squid 6.12-r0, both pinned in the
-Dockerfile. The process runs as uid 31, drops every capability, and has no
-secret, backup, data or Docker socket mount. Squid sees the CONNECT hostname
-and the resolved address. It does not see the TLS payload.
+The proxy image pin is unchanged: Alpine 3.22.1
+`sha256:4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1`
+and Squid 6.12-r0. This revision did not scan that image, so it is not marked
+safe here. The process is intended to run as uid 31, drop every capability,
+and mount no secret, backup, data, or Docker socket. Squid would see the
+CONNECT hostname and the resolved address, not the TLS payload. The staging
+fixture listens on 8443 without an added capability. That exception is only in
+a generated test config. The committed `squid.conf` still allows port 443 only.
