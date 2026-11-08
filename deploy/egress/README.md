@@ -100,7 +100,10 @@ not internal or if a capability, the host network, or the Docker socket
 appears. It does not mount production data, backups, or secrets.
 
 It stops before creating those resources when any planned name is already
-present. On a later failure it runs `docker compose stop` and prints the
+present. Built-in networks such as `host` and `none` have no IPAM config.
+That is recorded as a network with no subnet. A failed `docker network
+inspect` stops the run and prints the inventory collected so far. On a later
+failure the harness runs `docker compose stop` and prints the
 inventory. It does not run `docker compose down`, `docker rm`, `docker run
 --rm`, or nft rollback. Stopped containers, networks, the stage directory, and
 any nft table that was installed stay on the host. `host-stage.sh stop --plan

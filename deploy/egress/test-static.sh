@@ -14,7 +14,7 @@ fail() {
 }
 
 echo "== syntax"
-for script in render-squid-conf.sh proxy-entrypoint.sh app-entrypoint.sh host-rules.sh stage-perms.sh host-stage.sh; do
+for script in render-squid-conf.sh proxy-entrypoint.sh app-entrypoint.sh host-rules.sh stage-perms.sh host-stage.sh pack-bundle.sh; do
   sh -n "$root/$script"
 done
 
@@ -192,5 +192,138 @@ fi
 grep -q 'user: 10001:10001' "$work/render.yml" || fail "fixture user missing"
 grep -q 'no-new-privileges:true' "$work/render.yml" || fail "nnp missing"
 grep -q 'read_only: true' "$work/render.yml" || fail "read only missing"
+
+echo "== canonical bundle"
+"$root/pack-bundle.sh" "$work/bundle"
+extracted="$work/extracted"
+mkdir -p "$extracted"
+tar -xf "$work/bundle/egress-checkpoint.tar" -C "$extracted"
+bundle="$extracted/egress-checkpoint"
+test -x "$bundle/deploy/egress/host-stage.sh" || fail "extracted host-stage.sh is not executable"
+[ "$(stat -c '%a' "$bundle/deploy/egress/host-stage.sh")" = "755" ] || fail "extracted host-stage.sh mode is not 755"
+[ "$(stat -c '%a' "$bundle/deploy/egress/test-static.sh")" = "755" ] || fail "extracted test-static.sh mode is not 755"
+( cd "$bundle" && sha256sum -c SHA256SUMS >/dev/null ) || fail "checksum manifest does not match the extracted files"
+[ "$(tr -d '[:space:]' < "$bundle/SOURCE_COMMIT")" = "$(git -C "$root/../.." rev-parse HEAD)" ] || fail "SOURCE_COMMIT does not match HEAD"
+sh -n "$bundle/deploy/egress/host-stage.sh"
+
+stub="$work/stubs"
+mkdir -p "$stub"
+cat > "$stub/docker-ok" <<'EOF'
+#!/bin/sh
+if [ "$1" = "ps" ]; then
+  printf '%s\n' 'valentinvera-reviewer-app-1 valentinvera-reviewer'
+  printf '%s\n' 'lonely-container'
+  exit 0
+fi
+if [ "$1" = "network" ] && [ "$2" = "ls" ]; then
+  printf '%s\n' bridge
+  printf '%s\n' host
+  printf '%s\n' none
+  printf '%s\n' emptyipam
+  printf '%s\n' ipv6net
+  exit 0
+fi
+if [ "$1" = "network" ] && [ "$2" = "inspect" ]; then
+  case "$3" in
+    host|none) printf '%s\n' null; exit 0 ;;
+    emptyipam) printf '%s\n' '[]'; exit 0 ;;
+    bridge) printf '%s\n' '[{"Subnet":"172.17.0.0/16","IPRange":"","Gateway":"172.17.0.1"}]'; exit 0 ;;
+    ipv6net) printf '%s\n' '[{"Subnet":"172.30.200.0/24"},{"Subnet":"fd00:dead:beef::/64"}]'; exit 0 ;;
+  esac
+  echo "unexpected network $3" >&2
+  exit 1
+fi
+echo "unexpected docker $*" >&2
+exit 1
+EOF
+cat > "$stub/docker-fail" <<'EOF'
+#!/bin/sh
+if [ "$1" = "ps" ]; then
+  printf '%s\n' 'lonely-container'
+  exit 0
+fi
+if [ "$1" = "network" ] && [ "$2" = "ls" ]; then
+  printf '%s\n' bridge
+  printf '%s\n' broken
+  exit 0
+fi
+if [ "$1" = "network" ] && [ "$2" = "inspect" ]; then
+  case "$3" in
+    bridge) printf '%s\n' '[{"Subnet":"172.17.0.0/16","Gateway":"172.17.0.1"}]'; exit 0 ;;
+    broken) echo 'Error response from daemon: denied' >&2; exit 1 ;;
+  esac
+fi
+echo "unexpected docker $*" >&2
+exit 1
+EOF
+printf '%s\n' '2: br-f5d584fd553b: <BROADCAST,UP>' > "$stub/ip-out"
+cat > "$stub/ip" <<'EOF'
+#!/bin/sh
+cat "$STUB_DIR/ip-out"
+exit 0
+EOF
+cat > "$stub/ss" <<'EOF'
+#!/bin/sh
+printf '%s\n' 'LISTEN 0 128 127.0.0.1:3000 0.0.0.0:*'
+exit 0
+EOF
+cat > "$stub/nft" <<'EOF'
+#!/bin/sh
+printf '%s\n' 'table inet filter'
+exit 0
+EOF
+chmod 0755 "$stub/docker-ok" "$stub/docker-fail" "$stub/ip" "$stub/ss" "$stub/nft"
+
+stage_sh="$bundle/deploy/egress/host-stage.sh"
+STUB_DIR="$stub" EGRESS_DOCKER="$stub/docker-ok" EGRESS_IP="$stub/ip" EGRESS_SS="$stub/ss" EGRESS_NFT="$stub/nft" \
+  "$stage_sh" collect --inventory "$work/stock.inv"
+grep -q '^network host$' "$work/stock.inv" || fail "host network missing from inventory"
+grep -q '^network none$' "$work/stock.inv" || fail "none network missing from inventory"
+grep -q '^network emptyipam$' "$work/stock.inv" || fail "empty IPAM network missing from inventory"
+grep -q '^subnet 172.17.0.0/16$' "$work/stock.inv" || fail "bridge IPv4 subnet missing"
+grep -q '^subnet 172.30.200.0/24$' "$work/stock.inv" || fail "IPv6 network IPv4 subnet missing"
+grep -q '^subnet fd00:dead:beef::/64$' "$work/stock.inv" || fail "IPv6 subnet missing"
+grep -q '^container lonely-container$' "$work/stock.inv" || fail "container without a project label was dropped"
+grep -q '^project valentinvera-reviewer$' "$work/stock.inv" || fail "compose project missing"
+grep -q '^bridge br-f5d584fd553b$' "$work/stock.inv" || fail "bridge link missing"
+grep -q '^port 3000$' "$work/stock.inv" || fail "listener port missing"
+if grep -q '^subnet null$\|^subnet $\|^subnet$' "$work/stock.inv"; then
+  fail "empty IPAM was recorded as a subnet"
+fi
+awk '
+  $1 == "network" && ($2 == "host" || $2 == "none" || $2 == "emptyipam") { pending = $2; next }
+  pending && $1 == "subnet" { print pending; exit 1 }
+  { pending = "" }
+' "$work/stock.inv" || fail "a network without IPAM gained a subnet"
+
+"$stage_sh" plan --inventory "$work/stock.inv" --suffix abcdef --plan "$work/stock.plan" --stage-dir "$work/stage"
+grep -q '^PROJECT=vvrstabcdef$' "$work/stock.plan" || fail "plan ignored a normal inventory"
+"$stage_sh" preflight --inventory "$work/stock.inv" --plan "$work/stock.plan" > "$work/preflight.out"
+grep -q 'preflight clear' "$work/preflight.out" || fail "preflight rejected a normal inventory"
+cp "$work/stock.inv" "$work/collide.inv"
+printf '%s\n' 'subnet 172.30.143.0/24' >> "$work/collide.inv"
+"$stage_sh" plan --inventory "$work/collide.inv" --suffix abcdef --plan "$work/collide.plan" --stage-dir "$work/stage" \
+  >/dev/null 2>"$work/collide.err" && fail "colliding subnet was accepted"
+grep -q 'could not allocate' "$work/collide.err" || fail "collision refusal missing"
+printf '%s\n' 'bridge br-vvr-sabcdefa' >> "$work/stock.inv"
+"$stage_sh" preflight --inventory "$work/stock.inv" --plan "$work/stock.plan" \
+  >/dev/null 2>"$work/bridge-collide.err" && fail "colliding bridge was accepted"
+grep -q 'refusing to replace an existing stage resource' "$work/bridge-collide.err" || fail "bridge collision refusal missing"
+
+STUB_DIR="$stub" EGRESS_DOCKER="$stub/docker-fail" EGRESS_IP="$stub/ip" EGRESS_SS="$stub/ss" EGRESS_NFT="$stub/nft" \
+  "$stage_sh" collect --inventory "$work/fail.inv" >/dev/null 2>"$work/inspect.err" && fail "inspect failure was ignored"
+grep -q 'FAIL: docker network inspect broken' "$work/inspect.err" || fail "inspect failure did not name the network"
+grep -q 'Error response from daemon: denied' "$work/inspect.err" || fail "inspect stderr was swallowed"
+grep -q '== partial inventory' "$work/inspect.err" || fail "partial inventory was not printed"
+grep -q '^subnet 172.17.0.0/16$' "$work/inspect.err" || fail "partial inventory omitted the earlier subnet"
+grep -q '^network broken$' "$work/inspect.err" || fail "partial inventory omitted the failed network"
+if grep -q 'subnet' "$work/fail.inv" && grep -q 'broken' "$work/fail.inv"; then
+  if awk '$1 == "network" && $2 == "broken" { pending = 1; next } pending && $1 == "subnet" { exit 1 } { pending = 0 }' "$work/fail.inv"; then
+    :
+  else
+    fail "failed inspect invented a subnet"
+  fi
+fi
+
 echo "static checks passed; live transport was not run"
 echo "work directory retained at $keep"

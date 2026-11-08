@@ -13,10 +13,12 @@ fi
 
 docker_cmd="${EGRESS_DOCKER:-docker}"
 nft_cmd="${EGRESS_NFT:-nft}"
+ip_cmd="${EGRESS_IP:-ip}"
+ss_cmd="${EGRESS_SS:-ss}"
 idle_seconds="${EGRESS_IDLE_SECONDS:-310}"
 
 usage() {
-  echo "usage: host-stage.sh {plan|preflight|run|stop|inventory} [--inventory FILE] [--plan FILE] [--suffix SUFFIX] [--stage-dir DIR]" >&2
+  echo "usage: host-stage.sh {plan|preflight|run|stop|inventory|collect} [--inventory FILE] [--plan FILE] [--suffix SUFFIX] [--stage-dir DIR]" >&2
   exit 1
 }
 
@@ -36,7 +38,7 @@ while [ $# -gt 0 ]; do
 done
 
 case "$action" in
-  plan|preflight|run|stop|inventory) ;;
+  plan|preflight|run|stop|inventory|collect) ;;
   *) usage ;;
 esac
 
@@ -201,35 +203,119 @@ preflight_plan() {
   echo "preflight clear for $(plan_get PROJECT)"
 }
 
+append_inventory() {
+  printf '%s\n' "$1" >> "$inventory_file"
+}
+
+# A failed command prints its stderr and the inventory collected so far.
+# An empty result is success. Do not hide a non-zero status.
+capture_cmd() {
+  label=$1
+  shift
+  err=$(mktemp "${TMPDIR:-/tmp}/vvr-inv.XXXXXX")
+  out=$(timeout 30 "$@" 2>"$err") && status=0 || status=$?
+  if [ "$status" -ne 0 ]; then
+    echo "FAIL: $label (exit $status)" >&2
+    if [ -s "$err" ]; then
+      cat "$err" >&2
+    fi
+    echo "== partial inventory" >&2
+    if [ -s "$inventory_file" ]; then
+      cat "$inventory_file" >&2
+    else
+      echo "(empty)" >&2
+    fi
+    rm -f "$err"
+    exit 1
+  fi
+  rm -f "$err"
+  printf '%s' "$out"
+}
+
+# null, empty, and [] are normal for host, none, and networks without IPAM.
+emit_subnets() {
+  raw=$1
+  compact=$(printf '%s' "$raw" | tr -d '[:space:]')
+  case "$compact" in
+    ''|null|'null'|'[]')
+      return 0
+      ;;
+  esac
+  printf '%s\n' "$raw" | awk '
+    {
+      line = $0
+      while (match(line, /"Subnet"[[:space:]]*:[[:space:]]*"[^"]*"/)) {
+        item = substr(line, RSTART, RLENGTH)
+        sub(/^"Subnet"[[:space:]]*:[[:space:]]*"/, "", item)
+        sub(/"$/, "", item)
+        if (item != "") print item
+        line = substr(line, RSTART + RLENGTH)
+      }
+    }
+  '
+}
+
+read_records() {
+  while IFS= read -r record || [ -n "$record" ]; do
+    if [ -z "$record" ]; then
+      continue
+    fi
+    case "$1" in
+      container)
+        name=$(printf '%s\n' "$record" | awk '{ print $1 }')
+        project=$(printf '%s\n' "$record" | awk '{ print $2 }')
+        if [ -n "$name" ]; then
+          append_inventory "container $name"
+        fi
+        if [ -n "$project" ]; then
+          append_inventory "project $project"
+        fi
+        ;;
+      network)
+        append_inventory "network $record"
+        raw=$(capture_cmd "docker network inspect $record" "$docker_cmd" network inspect "$record" --format '{{json .IPAM.Config}}')
+        subnets=$(emit_subnets "$raw")
+        if [ -n "$subnets" ]; then
+          while IFS= read -r item || [ -n "$item" ]; do
+            if [ -n "$item" ]; then
+              append_inventory "subnet $item"
+            fi
+          done <<ENDSUBNETS
+$subnets
+ENDSUBNETS
+        fi
+        ;;
+    esac
+  done <<ENDRECORDS
+$2
+ENDRECORDS
+}
+
 collect_inventory() {
-  {
-    timeout 30 "$docker_cmd" ps -a --format '{{.Names}} {{.Label "com.docker.compose.project"}}' | while IFS= read -r line; do
-      name=$(printf '%s\n' "$line" | awk '{ print $1 }')
-      project=$(printf '%s\n' "$line" | awk '{ print $2 }')
-      [ -n "$name" ] && echo "container $name"
-      [ -n "$project" ] && echo "project $project"
-    done
-    timeout 30 "$docker_cmd" network ls --format '{{.Name}}' | while IFS= read -r name; do
-      [ -n "$name" ] || continue
-      echo "network $name"
-      subnet=$(timeout 15 "$docker_cmd" network inspect "$name" --format '{{range .IPAM.Config}}{{.Subnet}}{{"\n"}}{{end}}' 2>/dev/null || true)
-      printf '%s\n' "$subnet" | while IFS= read -r item; do
-        [ -n "$item" ] && echo "subnet $item"
-      done
-    done
-    timeout 15 ip -o link show | awk -F': ' '{
-      name = $2
-      sub(/:.*/, "", name)
-      sub(/@.*$/, "", name)
-      if (name ~ /^br/) print "bridge", name
-    }'
-    timeout 15 "$nft_cmd" list tables 2>/dev/null | awk '$1 == "table" && $2 == "inet" { print "table", $3 }'
-    timeout 15 ss -H -ltn | awk '{
-      addr = $4
-      n = split(addr, parts, ":")
-      if (n >= 2 && parts[n] ~ /^[0-9]+$/) print "port", parts[n]
-    }'
-  } > "$inventory_file"
+  [ -n "$inventory_file" ] || {
+    echo "collect needs --inventory" >&2
+    exit 1
+  }
+  : > "$inventory_file"
+  containers=$(capture_cmd "docker ps" "$docker_cmd" ps -a --format '{{.Names}} {{.Label "com.docker.compose.project"}}')
+  read_records container "$containers"
+  networks=$(capture_cmd "docker network ls" "$docker_cmd" network ls --format '{{.Name}}')
+  read_records network "$networks"
+  links=$(capture_cmd "ip link" "$ip_cmd" -o link show)
+  printf '%s\n' "$links" | awk -F': ' '{
+    name = $2
+    sub(/:.*/, "", name)
+    sub(/@.*$/, "", name)
+    if (name ~ /^br/) print "bridge", name
+  }' >> "$inventory_file"
+  tables=$(capture_cmd "nft list tables" "$nft_cmd" list tables)
+  printf '%s\n' "$tables" | awk '$1 == "table" && $2 == "inet" { print "table", $3 }' >> "$inventory_file"
+  listeners=$(capture_cmd "ss listeners" "$ss_cmd" -H -ltn)
+  printf '%s\n' "$listeners" | awk '{
+    addr = $4
+    n = split(addr, parts, ":")
+    if (n >= 2 && parts[n] ~ /^[0-9]+$/) print "port", parts[n]
+  }' >> "$inventory_file"
 }
 
 require_tools() {
@@ -438,6 +524,7 @@ case "$action" in
   preflight) preflight_plan ;;
   run) run_stage ;;
   stop) stop_stage ;;
+  collect) collect_inventory ;;
   inventory)
     [ -n "$plan_file" ] && [ -f "$plan_file" ] || usage
     print_inventory
