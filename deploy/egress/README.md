@@ -49,12 +49,12 @@ show that the network controls work.
   that does not arrive on one of the four stage bridges is left to the later
   chains.
 
-| Bridge  | To the host                                                           | New flow that stays allowed                                                                                     | Reply                      | Everything else on that bridge                                                                 |
-| ------- | --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | -------------------------- | ---------------------------------------------------------------------------------------------- |
-| App     | IPv6 dropped; established IPv4 kept; other IPv4 dropped               | TCP to the proxy on port 3128                                                                                   | established conntrack only | dropped, including IPv6 and a new flow whose source port is 3128                               |
-| Ingress | IPv4 and IPv6 dropped, including an established session from the host | TCP from the relay `.2` to the app `.10` on the one listen port                                                 | established conntrack only | dropped, including a new session from the app to the relay and a new flow from the listen port |
-| Publish | IPv6 dropped; established IPv4 kept; other new IPv4 dropped           | none                                                                                                            | established conntrack only | dropped, including IPv6 and a new flow whose source port is the listen port                    |
-| Egress  | IPv6 dropped; established IPv4 kept; other IPv4 dropped               | TCP port 443 after the bogon drop. A stage install may also allow the exact fixture address on port 8443 first. | established conntrack only | dropped, including IPv6 and a new flow whose source port is 443                                |
+| Bridge  | To the host                                                                                       | New flow that stays allowed                                                                                  | Reply                      | Everything else on that bridge                                                                 |
+| ------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | -------------------------- | ---------------------------------------------------------------------------------------------- |
+| App     | IPv6 dropped; established IPv4 kept; other IPv4 dropped                                           | TCP to the proxy on port 3128                                                                                | established conntrack only | dropped, including IPv6 and a new flow whose source port is 3128                               |
+| Ingress | IPv4 and IPv6 dropped, including an established session from the host                             | TCP from the relay `.2` to the app `.10` on the one listen port                                              | established conntrack only | dropped, including a new session from the app to the relay and a new flow from the listen port |
+| Publish | IPv6 dropped; established IPv4 kept; other new IPv4 dropped                                       | none                                                                                                         | established conntrack only | dropped, including IPv6 and a new flow whose source port is the listen port                    |
+| Egress  | inet INPUT drops host-local IPv4 except an established session. Bridge INPUT is a different hook. | Routed TCP 443 only after the bogon drop. Same-bridge TCP 443, and a stage fixture on 8443 before that drop. | established conntrack only | other new IPv4 and IPv6 dropped. No source-port accept.                                        |
 
 A source port does not prove an established reply. The bridge rules accept
 `ct state established,related` and the directional new flows above. They do
@@ -63,6 +63,20 @@ port. Production install does not pass the fixture address, so port 8443 is
 not allowed there. The fixture address is inside `172.16.0.0/12`, and the
 stage exception is placed before the bogon drop so the quiet oracle can still
 reach it after the rules are installed.
+
+Bridge INPUT and inet INPUT are not the same decision. Bridge INPUT sees a
+frame whose Ethernet destination is that bridge. On the egress bridge, the
+proxy's route to the public internet uses the gateway MAC, so a new TCP port
+443 frame hits bridge INPUT before the host decides whether to route it.
+Accepting that frame there is not permission to deliver it to a host service
+and it is not permission to skip the bogon check. inet INPUT still drops a
+packet the route lookup delivers to the host, including port 443. inet FORWARD
+still drops bogons, then accepts TCP 443, then drops every other packet
+forwarded from that bridge. App, ingress, and publish bridge INPUT do not
+accept this routed exception. One host run recorded 9 IPv4 drops in egress
+bridge INPUT and zero packets on both port 443 forward rules while GitHub
+timed out. Those counters are compatible with this gate. They do not identify
+the nine frames, and this text is not a claim that the next run will pass.
 
 The previous static check grepped the publish-bridge drop and the
 `--ingress-network` rollback filter. It did not require the ingress bridge to
@@ -124,7 +138,7 @@ sudo deploy/egress/host-stage.sh run --stage-dir /var/tmp/vvr-stage-manual
 Use an empty stage directory. The harness allocates a project `vvrst` plus six
 hex digits, bridges `br-vvr-s<suffix>a`, `e`, `i` and `p`, four free
 `172.30.0.0/16` /24s outside the examples above, and a loopback port in
-20000-20899. It will not reuse the retained `a41b73` or `e7b421` stages. It renders Compose
+20000-20899. It will not reuse the retained `a41b73`, `e7b421`, or `b83c52` stages. It renders Compose
 and refuses the result if the app network is
 not internal or if a capability, the host network, or the Docker socket
 appears. It does not mount production data, backups, or secrets.
@@ -169,10 +183,11 @@ gateway to publish `127.0.0.1`. It listens on one unprivileged port and
 connects only to `172.30.<octet>.10` on that same port. It is not attached to
 the proxy network. Its publish network has masquerade disabled. Once the
 scoped nft table is installed, new packets from that publish bridge are
-dropped and established replies are kept. The host has run this relay once,
-before these rules were installed. The post-rule loopback, the second quiet
-tunnel, and the source-port checks have not passed on the host. The cloud VM
-bridge failure was not rerun and is not evidence about this host.
+dropped and established replies are kept. The host has run this relay, and
+loopback health passed once after the tables were installed. The post-rule
+GitHub request on that run timed out. The second quiet tunnel and the
+source-port checks have not passed. The cloud VM bridge failure was not
+rerun and is not evidence about this host.
 
 The relay image uses the same Alpine digest as the proxy and `socat=1.8.1.3-r0`.
 It was not scanned. It runs as uid 65534, read-only, with every capability

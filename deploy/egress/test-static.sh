@@ -75,6 +75,9 @@ grep -q 'refusing retained stage' "$work/retained.err" || fail "retained stage r
 "$root/host-stage.sh" plan --inventory "$work/empty-inventory" --suffix e7b421 --plan "$work/retained-e7.plan" --stage-dir "$work" >/dev/null 2>"$work/retained-e7.err" && fail "retained e7b421 stage was planned"
 grep -q 'refusing retained stage' "$work/retained-e7.err" || fail "retained e7b421 refusal missing"
 grep -q '^PORT=20129$' "$work/ok.plan" && fail "plan reused the retained e7b421 port"
+"$root/host-stage.sh" plan --inventory "$work/empty-inventory" --suffix b83c52 --plan "$work/retained-b8.plan" --stage-dir "$work" >/dev/null 2>"$work/retained-b8.err" && fail "retained b83c52 stage was planned"
+grep -q 'refusing retained stage' "$work/retained-b8.err" || fail "retained b83c52 refusal missing"
+grep -q '^PORT=20566$' "$work/ok.plan" && fail "plan reused the retained b83c52 port"
 "$root/host-stage.sh" preflight --inventory "$work/empty-inventory" --plan "$work/ok.plan" >/dev/null
 "$root/host-stage.sh" preflight --inventory "$work/inventory" --plan "$work/ok.plan" >/dev/null 2>"$work/preflight.err" && fail "preflight replaced an existing bridge"
 grep -q 'refusing to replace' "$work/preflight.err" || fail "preflight did not refuse"
@@ -192,6 +195,41 @@ binput = bridge.split("chain forward", 1)[0]
 binput_lines = [line.strip() for line in binput.splitlines() if ingress in line and "counter" in line]
 if any("accept" in line for line in binput_lines):
     raise SystemExit("bridge ingress input accepts traffic: " + repr(binput_lines))
+egress = "br-vvr-sabcdefe"
+inet_input = rules.split("chain forward", 1)[0]
+inet_forward = rules.split("chain forward", 1)[1].split("table bridge ", 1)[0]
+if "tcp dport 443" in inet_input:
+    raise SystemExit("inet input accepts tcp 443, which is host-local delivery")
+if "gateway-l2-to-routing" in inet_input or "gateway-l2-to-routing" in inet_forward or "gateway-l2-to-routing" in bforward:
+    raise SystemExit("gateway frame accept is outside bridge input")
+gateway = 'meta ibrname "%s" ether type ip tcp dport 443 counter accept comment "gateway-l2-to-routing"' % egress
+if gateway not in binput:
+    raise SystemExit("egress bridge input does not hand tcp 443 frames to routing")
+if 'meta ibrname "%s" ether type ip counter drop' % egress not in binput:
+    raise SystemExit("egress bridge input keeps other new ipv4")
+ipv6_drop = binput.find('meta ibrname "%s" ether type ip6 counter drop' % egress)
+established_bridge = binput.find('meta ibrname "%s" ether type ip ct state established,related counter accept' % egress)
+gateway_at = binput.find(gateway)
+other_drop = binput.find('meta ibrname "%s" ether type ip counter drop' % egress)
+if not (0 <= ipv6_drop < established_bridge < gateway_at < other_drop):
+    raise SystemExit("egress bridge input order is not ipv6 drop, established, gateway tcp 443, other ipv4 drop")
+app = "br-vvr-sabcdefa"
+app_lines = [line.strip() for line in binput.splitlines() if app in line and "counter" in line]
+if not any(line.endswith("counter drop") for line in app_lines):
+    raise SystemExit("app bridge input does not drop new ipv4")
+if any("gateway-l2-to-routing" in line or "tcp dport 443" in line for line in app_lines):
+    raise SystemExit("app bridge input accepts routed egress")
+established = inet_forward.find('iifname "%s" ct state established,related counter accept' % egress)
+bogon = inet_forward.find('iifname "%s" ip daddr @bogon4 counter drop' % egress)
+routed = inet_forward.find('iifname "%s" tcp dport 443 counter accept' % egress)
+forward_drop = inet_forward.find('iifname "%s" counter drop' % egress)
+if not (0 <= established < bogon < routed < forward_drop):
+    raise SystemExit("routed egress is not established, bogon drop, tcp 443, then drop")
+host_lines = [line.strip() for line in inet_input.splitlines() if egress in line and "counter" in line]
+if not any(line.endswith("counter drop") for line in host_lines):
+    raise SystemExit("inet input does not drop host-local egress delivery")
+if any("tcp dport" in line for line in host_lines):
+    raise SystemExit("inet input allows a destination port from the egress bridge")
 PY
 : > "$NFT_LOG"
 # shellcheck disable=SC2086

@@ -64,7 +64,8 @@ forbidden_value() {
 reserved_value() {
   case "$1" in
     a41b73|sa41b73|vvrsta41b73|vvrsta41b73a|vvrsta41b73e|br-vvr-sa41b73a|br-vvr-sa41b73e|reviewer_egress_sa41b73|172.30.149.0/24|172.30.150.0/24|20831|\
-    e7b421|se7b421|vvrste7b421|vvrste7b421a|vvrste7b421e|vvrste7b421i|vvrste7b421p|br-vvr-se7b421a|br-vvr-se7b421e|br-vvr-se7b421i|br-vvr-se7b421p|reviewer_egress_se7b421|172.30.167.0/24|172.30.168.0/24|172.30.169.0/24|172.30.170.0/24|20129)
+    e7b421|se7b421|vvrste7b421|vvrste7b421a|vvrste7b421e|vvrste7b421i|vvrste7b421p|br-vvr-se7b421a|br-vvr-se7b421e|br-vvr-se7b421i|br-vvr-se7b421p|reviewer_egress_se7b421|172.30.167.0/24|172.30.168.0/24|172.30.169.0/24|172.30.170.0/24|20129|\
+    b83c52|sb83c52|vvrstb83c52|vvrstb83c52a|vvrstb83c52e|vvrstb83c52i|vvrstb83c52p|br-vvr-sb83c52a|br-vvr-sb83c52e|br-vvr-sb83c52i|br-vvr-sb83c52p|reviewer_egress_sb83c52|172.30.154.0/24|172.30.155.0/24|172.30.156.0/24|172.30.157.0/24|20566)
       return 0
       ;;
   esac

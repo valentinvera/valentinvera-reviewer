@@ -287,6 +287,7 @@ table bridge ${table} {
     meta ibrname "${app_bridge}" ether type ip ct state established,related counter accept
     meta ibrname "${app_bridge}" ether type ip counter drop
     meta ibrname "${egress_bridge}" ether type ip ct state established,related counter accept
+    meta ibrname "${egress_bridge}" ether type ip tcp dport 443 counter accept comment "gateway-l2-to-routing"
     meta ibrname "${egress_bridge}" ether type ip counter drop
     meta ibrname "${publish_bridge}" ether type ip ct state established,related counter accept
     meta ibrname "${publish_bridge}" ether type ip counter drop
