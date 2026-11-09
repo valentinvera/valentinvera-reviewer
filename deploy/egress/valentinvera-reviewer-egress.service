@@ -1,0 +1,18 @@
+[Unit]
+Description=App-only egress filter for valentinvera-reviewer
+DefaultDependencies=no
+After=systemd-modules-load.service local-fs.target
+Before=docker.service
+Wants=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Name-keyed rules load before dockerd. A second start is a no-op when the
+# tables already match, so systemctl restart does not refuse or flush them.
+# No ExecStop. Rollback is an explicit host-rules.sh rollback.
+ExecStart=/usr/local/sbin/valentinvera-reviewer-egress install --before-bridges --ingress-bridge br-vvr-ingress --publish-bridge br-vvr-publish --ingress-relay 172.30.219.2 --ingress-upstream 172.30.219.10 --ingress-port 3000
+
+[Install]
+WantedBy=multi-user.target
+WantedBy=docker.service

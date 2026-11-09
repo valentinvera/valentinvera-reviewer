@@ -1,0 +1,147 @@
+# Reviewed egress topology for valentinvera-reviewer.
+# The app network has no external route. Only the proxy is dual-homed.
+# Set the variables in an untracked env file. This file has no secrets.
+
+name: ${EGRESS_PROJECT_NAME:-valentinvera-reviewer}
+
+services:
+  proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: valentinvera-reviewer-egress:${EGRESS_IMAGE_TAG:-1}
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.25
+    user: "31:31"
+    environment:
+      PROXY_BIND: ${PROXY_IP:?set PROXY_IP}:3128
+      PROXY_SRC: ${APP_SUBNET:?set APP_SUBNET}
+    tmpfs:
+      - /tmp:size=16m,mode=1777,noexec,nosuid,nodev
+      - /var/log/squid:size=16m,uid=31,gid=31,mode=0750,noexec,nosuid,nodev
+      - /var/run/squid:size=1m,uid=31,gid=31,mode=0750,noexec,nosuid,nodev
+    networks:
+      app:
+        ipv4_address: ${PROXY_IP}
+      egress: {}
+    restart: unless-stopped
+
+  app:
+    profiles: ["app"]
+    image: ${REVIEWER_IMAGE:?set REVIEWER_IMAGE}
+    user: "10001:10001"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 512m
+    cpus: 1
+    # Docker's embedded stub forwards only to this address. Nothing listens on it.
+    # The staging client uses one logging resolver instead, so that forward can be observed.
+    dns:
+      - 127.0.0.1
+    environment:
+      EGRESS_REQUIRED: "1"
+      EGRESS_PROXY_URL: http://${PROXY_IP}:3128
+      HTTPS_PROXY: http://${PROXY_IP}:3128
+      HTTP_PROXY: http://${PROXY_IP}:3128
+      ALL_PROXY: http://${PROXY_IP}:3128
+    volumes:
+      - ${REVIEWER_DATA_DIR:?set REVIEWER_DATA_DIR}:/app/data
+      - ${REVIEWER_BACKUP_DIR:?set REVIEWER_BACKUP_DIR}:/backups
+      - ${REVIEWER_SECRETS_DIR:?set REVIEWER_SECRETS_DIR}:/app/secrets:ro
+      - /run/valentinvera-reviewer-egress:/run/egress-ready:ro
+    tmpfs:
+      - /tmp:size=64m,mode=1777,noexec,nosuid,nodev
+    networks:
+      app: {}
+      ingress:
+        ipv4_address: ${INGRESS_UPSTREAM_IP:?set INGRESS_UPSTREAM_IP}
+    depends_on:
+      - proxy
+    restart: unless-stopped
+
+  ingress:
+    build:
+      context: .
+      dockerfile: Dockerfile.ingress
+    image: valentinvera-reviewer-ingress:${EGRESS_IMAGE_TAG:-1}
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 64m
+    cpus: 0.25
+    user: "65534:65534"
+    environment:
+      INGRESS_LISTEN_PORT: ${INGRESS_LISTEN_PORT:?set INGRESS_LISTEN_PORT}
+      INGRESS_UPSTREAM: ${INGRESS_UPSTREAM_IP:?set INGRESS_UPSTREAM_IP}:${INGRESS_LISTEN_PORT}
+    tmpfs:
+      - /tmp:size=1m,uid=65534,gid=65534,mode=0700,noexec,nosuid,nodev
+    ports:
+      - 127.0.0.1:${REVIEWER_BIND_PORT:-3000}:${INGRESS_LISTEN_PORT}
+    networks:
+      ingress:
+        ipv4_address: ${INGRESS_RELAY_IP:?set INGRESS_RELAY_IP}
+      publish: {}
+    restart: unless-stopped
+
+networks:
+  app:
+    name: ${APP_NETWORK_NAME:?set APP_NETWORK_NAME}
+    # Docker programs published ports on the container's default-gateway
+    # network. This network stays internal, so the app has no gateway and
+    # cannot publish a host port. Loopback ingress is the separate relay.
+    internal: true
+    enable_ipv6: false
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: ${APP_BRIDGE:?set APP_BRIDGE}
+    ipam:
+      config:
+        - subnet: ${APP_SUBNET}
+          gateway: ${APP_GATEWAY:?set APP_GATEWAY}
+  egress:
+    name: ${EGRESS_NETWORK_NAME:?set EGRESS_NETWORK_NAME}
+    internal: false
+    enable_ipv6: false
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: ${EGRESS_BRIDGE:?set EGRESS_BRIDGE}
+    ipam:
+      config:
+        - subnet: ${EGRESS_SUBNET:?set EGRESS_SUBNET}
+          gateway: ${EGRESS_GATEWAY:?set EGRESS_GATEWAY}
+  ingress:
+    name: ${INGRESS_NETWORK_NAME:?set INGRESS_NETWORK_NAME}
+    internal: true
+    enable_ipv6: false
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: ${INGRESS_BRIDGE:?set INGRESS_BRIDGE}
+    ipam:
+      config:
+        - subnet: ${INGRESS_SUBNET:?set INGRESS_SUBNET}
+          gateway: ${INGRESS_GATEWAY:?set INGRESS_GATEWAY}
+  publish:
+    name: ${PUBLISH_NETWORK_NAME:?set PUBLISH_NETWORK_NAME}
+    internal: false
+    enable_ipv6: false
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: ${PUBLISH_BRIDGE:?set PUBLISH_BRIDGE}
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+    ipam:
+      config:
+        - subnet: ${PUBLISH_SUBNET:?set PUBLISH_SUBNET}
+          gateway: ${PUBLISH_GATEWAY:?set PUBLISH_GATEWAY}
