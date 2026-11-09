@@ -58,6 +58,7 @@ services:
       - ${REVIEWER_DATA_DIR:?set REVIEWER_DATA_DIR}:/app/data
       - ${REVIEWER_BACKUP_DIR:?set REVIEWER_BACKUP_DIR}:/backups
       - ${REVIEWER_SECRETS_DIR:?set REVIEWER_SECRETS_DIR}:/app/secrets:ro
+      - /run/valentinvera-reviewer-egress:/run/egress-ready:ro
     tmpfs:
       - /tmp:size=64m,mode=1777,noexec,nosuid,nodev
     networks:

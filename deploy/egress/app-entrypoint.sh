@@ -4,6 +4,12 @@
 set -eu
 
 if [ "${EGRESS_REQUIRED:-}" = "1" ]; then
+  ready=/run/egress-ready/ready
+  if [ ! -f "$ready" ] || [ "$(tr -d '[:space:]' < "$ready")" != "reviewer_egress" ]; then
+    echo "egress rules are not installed; refusing to start" >&2
+    exit 1
+  fi
+
   proxy="${EGRESS_PROXY_URL:-http://172.30.208.2:3128}"
   case "$proxy" in
     http://172.30.208.2:3128|http://172.30.209.2:3128|http://172.30.210.2:3128) ;;

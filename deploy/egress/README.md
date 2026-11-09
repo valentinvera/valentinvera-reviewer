@@ -104,10 +104,9 @@ check now parses the ruleset.
 
 ## Limits that remain
 
-- These rules are absent until `install` succeeds. A reboot removes them.
-  The harness does not install or enable the systemd unit. Starting the app
-  before the rules exist is not fail-closed, and that boot path has not been
-  tested. This is not a production-ready control.
+- The production unit loads the named tables before `docker.service` starts.
+  A script test covers that order. This checkout has not rebooted the host,
+  so the boot path is not proven on the machine that is already running.
 - A request that is allowed to `api.github.com` or `opencode.ai` can still send
   data to those APIs. This filter does not read the review body.
 - `opencode.ai` is behind Cloudflare. A CONNECT proxy that does not decrypt TLS
@@ -117,8 +116,10 @@ check now parses the ruleset.
   cannot use the proxy. That fails closed only while the app network stays
   internal and the host rules stay installed.
 - The image entrypoint does nothing when `EGRESS_REQUIRED` is unset, so an
-  older compose file still boots. Enforcement starts when this compose file and
-  the host unit are both in use.
+  older compose file still boots. With `EGRESS_REQUIRED=1` it refuses to start
+  unless `/run/egress-ready/ready` contains `reviewer_egress`. The running
+  production image does not have that check until it is rebuilt. The unit
+  order is what keeps the current image from starting before the tables.
 
 ## Staging
 
@@ -254,61 +255,84 @@ Commands the harness uses and does not install: `timeout`, `flock`, `nft`,
 
 ## Host activation
 
-Not authorized. `host-stage.sh` does not install the systemd unit, does not
-copy files to `/usr/local/sbin`, and does not recreate the production app.
-The steps below stay here so a later activation is not improvised. Do not
-flush filter tables, restart Docker, restart Tailscale, or recreate the
-running app until its queue has been drained on purpose.
+The egress path is already active on the hosting server from commit
+`befc8b79c8e7b61c7556babb1eb5a3a18c955a1a`. `host-stage.sh` still does not
+install the unit or recreate the production app. The steps below update that
+running setup so the tables load before Docker and a later deploy keeps the
+env. They were not run from this checkout.
 
-1. Build and tag the proxy image from `deploy/egress`.
-2. Copy `host-rules.sh` to `/usr/local/sbin/valentinvera-reviewer-egress` and
-   the systemd unit to `/etc/systemd/system/`.
-3. `systemctl daemon-reload` and enable the unit. The unit has no `ExecStop`.
-   Stopping it does not remove rules while the app is running.
-4. Before the first install, arm a one-shot rollback that a reboot cannot
-   cancel by itself:
+Snapshot the current files first:
 
-   ```sh
-   sudo systemd-run --on-active=20min --unit=reviewer-egress-rollback \
-     /usr/local/sbin/valentinvera-reviewer-egress rollback
-   ```
+```sh
+sudo cp -a /usr/local/sbin/valentinvera-reviewer-egress /var/tmp/reviewer-egress-bin.prev
+sudo cp -a /etc/systemd/system/valentinvera-reviewer-egress.service /var/tmp/reviewer-egress-unit.prev
+sudo cp -a /usr/local/sbin/deploy-app /var/tmp/deploy-app.prev 2>/dev/null || true
+sudo cp -a /srv/apps/valentinvera-reviewer/compose.yml /var/tmp/reviewer-compose.prev.yml
+sudo cp -a /srv/apps/valentinvera-reviewer/production.env /var/tmp/reviewer-production.prev.env
+sudo cp -a /srv/apps/valentinvera-reviewer/.deploy.env /var/tmp/reviewer-deploy.prev.env
+```
 
-   Cancel that timer with `systemctl stop reviewer-egress-rollback.timer` only
-   after `status` is healthy and the app can reach both allowed hosts.
+Install the new files and reload the unit. `install --before-bridges` loads
+rules named `br-vvr-app` and the other fixed bridges before those interfaces
+exist. When both tables already match, the same command prints `already
+installed` and does not run `nft -f`.
 
-5. Install the rules once the new bridges exist:
+```sh
+sudo install -m 0755 deploy/egress/host-rules.sh /usr/local/sbin/valentinvera-reviewer-egress
+sudo install -m 0644 deploy/egress/valentinvera-reviewer-egress.service /etc/systemd/system/valentinvera-reviewer-egress.service
+sudo install -m 0755 deploy/egress/deploy-app.sh /usr/local/sbin/deploy-app
+sudo systemctl daemon-reload
+sudo systemctl enable valentinvera-reviewer-egress.service
+sudo systemctl restart valentinvera-reviewer-egress.service
+sudo test -f /run/valentinvera-reviewer-egress/ready
+sudo grep -qx reviewer_egress /run/valentinvera-reviewer-egress/ready
+```
 
-   ```sh
-   sudo valentinvera-reviewer-egress install \
-     --app-bridge br-vvr-app --egress-bridge br-vvr-egress \
-     --ingress-bridge br-vvr-ingress --publish-bridge br-vvr-publish \
-     --ingress-relay 172.30.219.2 --ingress-upstream 172.30.219.10 \
-     --ingress-port 3000
-   sudo valentinvera-reviewer-egress status \
-     --app-bridge br-vvr-app --egress-bridge br-vvr-egress \
-     --ingress-bridge br-vvr-ingress --publish-bridge br-vvr-publish \
-     --ingress-relay 172.30.219.2 --ingress-upstream 172.30.219.10 \
-     --ingress-port 3000
-   ```
+Copy `deploy/egress/compose.yml` over the host compose file. Keep the host
+`production.env` directory lines. The new compose file adds a read-only mount
+of `/run/valentinvera-reviewer-egress` at `/run/egress-ready`. Recreate the
+proxy, relay, and app only after the marker exists:
 
-6. Recreate the app with `deploy/egress/compose.yml` and
-   `production.env.example`, still published on `127.0.0.1:3000` by the
-   ingress relay, with the existing data, backup and secret directories. Keep
-   the backup mount writable. The backup timer and the wrapper script stay as
-   they are. This step is not authorized.
+```sh
+sudo docker compose --env-file /srv/apps/valentinvera-reviewer/production.env \
+  -f /srv/apps/valentinvera-reviewer/compose.yml up -d proxy ingress
+sudo docker compose --env-file /srv/apps/valentinvera-reviewer/production.env \
+  -f /srv/apps/valentinvera-reviewer/compose.yml --profile app up -d app
+curl -fsS http://127.0.0.1:3000/health
+```
+
+The running app image checks the marker only after it is rebuilt with this
+entrypoint. Until then, the unit order is the gate. Keep the host healthcheck
+that unsets `HTTPS_PROXY`, `HTTP_PROXY`, and `ALL_PROXY` for the loopback
+`/health` request. Do not set `NO_PROXY`.
 
 `nftables.service` is disabled on the host and `netfilter-persistent` is not
 installed. Do not enable either. This unit loads `inet reviewer_egress` and
-`bridge reviewer_egress`.
-Docker and Tailscale rewrites do not delete a separate nft table. A reboot
-does, unless the unit is enabled. Run `install` again after a Tailscale or
-Docker restart if `status` fails.
+`bridge reviewer_egress`. Docker and Tailscale rewrites do not delete a
+separate nft table. A reboot drops the tables. The enabled unit loads them
+again before `docker.service`, and the app container's `unless-stopped`
+policy starts it after that. `restart` of the unit is safe while the tables
+match. A table that does not match is left in place and the command fails.
 
-Rollback is `host-rules.sh rollback --confirm-stopped` for one named table.
-It refuses while a container is still running on the staged networks, and it
-does not run `nft flush ruleset` or `iptables-restore`. `install` refuses when
-that table already exists instead of deleting it first. The lock wait is 15
-seconds.
+If `restart` or `/health` fails, restore the snapshotted binary, unit,
+compose file, and env files, then `systemctl daemon-reload`. Do not start the
+previous unit: that oneshot refuses while the tables exist and does not
+delete them. Bring the previous compose file back and start the previous app
+image. `/usr/local/sbin/reviewer-egress-rollback` is the full activation
+rollback. It removes the nft tables and restores the pre-egress app, so it is
+the wrong command for undoing only this boot change.
+
+`deploy/egress/deploy-app.sh` is what a merge to `main` runs. It keeps
+`production.env` and `.deploy.env` as the same full file, updates
+`REVIEWER_IMAGE` only, and refuses to start the app when the readiness file
+is absent. A failed health check writes the previous image back. It does not
+delete the proxy, the relay, or the tables. The backup mount stays because
+`REVIEWER_BACKUP_DIR` is part of that file.
+
+Rollback of the filter itself is `host-rules.sh rollback --confirm-stopped`
+for one named table. It refuses while a container is still running on the
+named networks, and it does not run `nft flush ruleset` or
+`iptables-restore`. The lock wait is 15 seconds.
 
 ## Proxy image
 

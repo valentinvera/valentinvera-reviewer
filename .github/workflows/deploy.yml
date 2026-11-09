@@ -104,16 +104,14 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
+      - uses: actions/checkout@v7
       - name: Deploy
         env:
           DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo "$GITHUB_TOKEN" | ssh \
-            -o StrictHostKeyChecking=yes \
-            -o UserKnownHostsFile="$HOME/.ssh/known_hosts" \
-            -o IdentitiesOnly=yes \
-            -o BatchMode=yes \
-            -o ConnectTimeout=20 \
-            "deploy@${DEPLOY_HOST}" \
-            "valentinvera-reviewer ${GITHUB_SHA}"
+          opts="-o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=20"
+          # shellcheck disable=SC2086
+          scp $opts deploy/egress/deploy-app.sh "deploy@${DEPLOY_HOST}:/tmp/valentinvera-reviewer-deploy-app.sh"
+          echo "$GITHUB_TOKEN" | ssh $opts "deploy@${DEPLOY_HOST}" \
+            "read -r GITHUB_TOKEN; export GITHUB_TOKEN; exec sh /tmp/valentinvera-reviewer-deploy-app.sh ${GITHUB_SHA}"

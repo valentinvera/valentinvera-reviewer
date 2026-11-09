@@ -22,6 +22,7 @@ egress_network=""
 ingress_network=""
 publish_network=""
 if_bridges_present=0
+before_bridges=0
 confirm_stopped=0
 action="status"
 nft_cmd="${EGRESS_NFT:-nft}"
@@ -29,7 +30,7 @@ docker_cmd="${EGRESS_DOCKER:-docker}"
 lock_dir="${EGRESS_LOCK_DIR:-/run/lock}"
 
 usage() {
-  echo "usage: host-rules.sh {install|status|rollback} [--table NAME] [--app-bridge IF] [--egress-bridge IF] [--ingress-bridge IF] [--publish-bridge IF] [--proxy-ip ADDR] [--ingress-relay ADDR] [--ingress-upstream ADDR] [--ingress-port PORT] [--fixture-ip ADDR] [--fixture-port PORT] [--dns-sink ADDR] [--app-network NAME] [--egress-network NAME] [--ingress-network NAME] [--publish-network NAME] [--if-bridges-present] [--confirm-stopped]" >&2
+  echo "usage: host-rules.sh {install|status|rollback} [--table NAME] [--app-bridge IF] [--egress-bridge IF] [--ingress-bridge IF] [--publish-bridge IF] [--proxy-ip ADDR] [--ingress-relay ADDR] [--ingress-upstream ADDR] [--ingress-port PORT] [--fixture-ip ADDR] [--fixture-port PORT] [--dns-sink ADDR] [--app-network NAME] [--egress-network NAME] [--ingress-network NAME] [--publish-network NAME] [--if-bridges-present] [--before-bridges] [--confirm-stopped]" >&2
   exit 1
 }
 
@@ -53,6 +54,7 @@ while [ $# -gt 0 ]; do
     --ingress-network) ingress_network="$2"; shift 2 ;;
     --publish-network) publish_network="$2"; shift 2 ;;
     --if-bridges-present) if_bridges_present=1; shift ;;
+    --before-bridges) before_bridges=1; shift ;;
     --confirm-stopped) confirm_stopped=1; shift ;;
     *) usage ;;
   esac
@@ -343,8 +345,42 @@ ${fixture_bridge}
 EOF
 }
 
+table_present() {
+  timeout 15 "$nft_cmd" list table "$1" "$table" >/dev/null 2>&1
+}
+
+rules_match() {
+  timeout 15 "$nft_cmd" list table inet "$table" >/dev/null 2>&1 || return 1
+  timeout 15 "$nft_cmd" list table bridge "$table" >/dev/null 2>&1 || return 1
+  listed=$(timeout 15 "$nft_cmd" list table inet "$table"; timeout 15 "$nft_cmd" list table bridge "$table")
+  for needle in "$app_bridge" "$ingress_bridge" "$egress_bridge" "$publish_bridge" "$proxy_ip" "$ingress_relay" "$ingress_upstream" "tcp dport ${ingress_port}" "tcp dport 3128" "tcp dport 443" "100.64.0.0/10" "169.254.0.0/16" "meta nfproto ipv6" "ether type ip6" "ct state established,related"; do
+    printf '%s\n' "$listed" | grep -q -F "$needle" || return 1
+  done
+  if [ -n "$fixture_ip" ]; then
+    printf '%s\n' "$listed" | grep -q -F "ip daddr ${fixture_ip} tcp dport ${fixture_port}" || return 1
+  fi
+  if [ -n "$dns_sink" ]; then
+    printf '%s\n' "$listed" | grep -q -F "ip daddr ${dns_sink} udp dport 53" || return 1
+    printf '%s\n' "$listed" | grep -q -F "ip daddr ${dns_sink} tcp dport 53" || return 1
+  fi
+  if printf '%s\n' "$listed" | grep -q -F 'tcp sport'; then
+    return 1
+  fi
+  return 0
+}
+
+mark_ready() {
+  if [ "$table" != "reviewer_egress" ]; then
+    return 0
+  fi
+  ready_dir="${EGRESS_READY_DIR:-/run/valentinvera-reviewer-egress}"
+  mkdir -p "$ready_dir"
+  printf '%s\n' reviewer_egress > "$ready_dir/ready"
+  chmod 0644 "$ready_dir/ready"
+}
+
 install_rules() {
-  if ! bridges_ready; then
+  if [ "$before_bridges" -eq 0 ] && ! bridges_ready; then
     if [ "$if_bridges_present" -eq 1 ]; then
       echo "bridges not present; nothing to enforce"
       return 0
@@ -353,7 +389,12 @@ install_rules() {
     exit 1
   fi
 
-  if timeout 15 "$nft_cmd" list table inet "$table" >/dev/null 2>&1 || timeout 15 "$nft_cmd" list table bridge "$table" >/dev/null 2>&1; then
+  if table_present inet || table_present bridge; then
+    if table_present inet && table_present bridge && rules_match; then
+      echo "inet and bridge ${table} already installed"
+      mark_ready
+      return 0
+    fi
     echo "refusing to replace existing table ${table}" >&2
     exit 1
   fi
@@ -363,6 +404,7 @@ install_rules() {
   timeout 15 "$nft_cmd" -c -f "$tmp"
   timeout 15 "$nft_cmd" -f "$tmp"
   rm -f "$tmp"
+  mark_ready
   echo "installed inet and bridge ${table} for ${app_bridge}, ${ingress_bridge}, ${egress_bridge}, and ${publish_bridge}"
 }
 
@@ -388,33 +430,12 @@ containers_running() {
 }
 
 status_rules() {
-  if ! bridges_ready; then
+  if [ "$before_bridges" -eq 0 ] && ! bridges_ready; then
     echo "required bridge is missing" >&2
     exit 1
   fi
-  timeout 15 "$nft_cmd" list table inet "$table" >/dev/null
-  timeout 15 "$nft_cmd" list table bridge "$table" >/dev/null
-  listed=$(timeout 15 "$nft_cmd" list table inet "$table"; timeout 15 "$nft_cmd" list table bridge "$table")
-  for needle in "$app_bridge" "$ingress_bridge" "$egress_bridge" "$publish_bridge" "$proxy_ip" "$ingress_relay" "$ingress_upstream" "tcp dport ${ingress_port}" "tcp dport 3128" "tcp dport 443" "100.64.0.0/10" "169.254.0.0/16" "meta nfproto ipv6" "ether type ip6" "ct state established,related"; do
-    if ! printf '%s\n' "$listed" | grep -q -F "$needle"; then
-      echo "table ${table} is missing ${needle}" >&2
-      exit 1
-    fi
-  done
-  if [ -n "$fixture_ip" ]; then
-    if ! printf '%s\n' "$listed" | grep -q -F "ip daddr ${fixture_ip} tcp dport ${fixture_port}"; then
-      echo "table ${table} is missing the stage fixture" >&2
-      exit 1
-    fi
-  fi
-  if [ -n "$dns_sink" ]; then
-    if ! printf '%s\n' "$listed" | grep -q -F "ip daddr ${dns_sink} udp dport 53" || ! printf '%s\n' "$listed" | grep -q -F "ip daddr ${dns_sink} tcp dport 53"; then
-      echo "table ${table} is missing the stage dns sink" >&2
-      exit 1
-    fi
-  fi
-  if printf '%s\n' "$listed" | grep -q -F 'tcp sport'; then
-    echo "table ${table} accepts a flow by source port" >&2
+  if ! rules_match; then
+    echo "table ${table} does not match the rendered rules" >&2
     exit 1
   fi
   echo "ok inet ${table}"

@@ -16,7 +16,7 @@ fail() {
 }
 
 echo "== syntax"
-for script in render-squid-conf.sh proxy-entrypoint.sh app-entrypoint.sh ingress-entrypoint.sh host-rules.sh stage-perms.sh host-stage.sh stage-route.sh pack-bundle.sh dns-reply.sh; do
+for script in render-squid-conf.sh proxy-entrypoint.sh app-entrypoint.sh ingress-entrypoint.sh host-rules.sh stage-perms.sh host-stage.sh stage-route.sh pack-bundle.sh dns-reply.sh deploy-app.sh test-boot-deploy.sh; do
   sh -n "$root/$script"
 done
 
@@ -548,6 +548,14 @@ assert int(ports[0]["target"]) == 3000
 assert set(ingress["networks"]) == {"ingress", "publish"}
 assert app["dns"] == ["127.0.0.1"], app.get("dns")
 assert "dns" not in cfg["services"]
+mounts = app.get("volumes") or []
+ready = False
+for item in mounts:
+    if isinstance(item, dict) and item.get("source") == "/run/valentinvera-reviewer-egress" and item.get("target") == "/run/egress-ready" and item.get("read_only") is True:
+        ready = True
+    if isinstance(item, str) and item.startswith("/run/valentinvera-reviewer-egress:/run/egress-ready") and item.endswith(":ro"):
+        ready = True
+assert ready, mounts
 PY
 
 echo "== ingress relay"
@@ -567,6 +575,9 @@ grep -q '172.30.<octet>.10' "$work/relay.err" || fail "relay refusal missing"
 INGRESS_LISTEN_PORT=8080 INGRESS_UPSTREAM=idle.fixture:8080 "$root/ingress-entrypoint.sh" >/dev/null 2>"$work/relay-name.err" && fail "relay accepted a hostname"
 INGRESS_LISTEN_PORT=80 INGRESS_UPSTREAM=172.30.145.10:80 "$root/ingress-entrypoint.sh" >/dev/null 2>&1 && fail "relay accepted a privileged port"
 "$root/ingress-entrypoint.sh" extra >/dev/null 2>&1 && fail "relay accepted arguments"
+
+echo "== boot order and deploy"
+"$root/test-boot-deploy.sh"
 
 echo "== canonical bundle"
 "$root/pack-bundle.sh" "$work/bundle"
