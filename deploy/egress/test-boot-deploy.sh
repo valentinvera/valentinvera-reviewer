@@ -23,6 +23,9 @@ fi
 if grep -q '^ExecStop=' "$unit"; then
   fail "the unit removes rules when it stops"
 fi
+dropin="$root/docker.service.d.conf"
+grep -q '^After=valentinvera-reviewer-egress.service$' "$dropin" || fail "docker is not ordered after the egress unit"
+grep -q '^Requires=valentinvera-reviewer-egress.service$' "$dropin" || fail "docker can start when the egress unit fails"
 
 prod_args="--table reviewer_egress --app-bridge br-vvr-app --egress-bridge br-vvr-egress --ingress-bridge br-vvr-ingress --publish-bridge br-vvr-publish --proxy-ip 172.30.208.2 --ingress-relay 172.30.219.2 --ingress-upstream 172.30.219.10 --ingress-port 3000"
 

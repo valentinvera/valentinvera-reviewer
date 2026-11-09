@@ -270,6 +270,7 @@ sudo cp -a /usr/local/sbin/deploy-app /var/tmp/deploy-app.prev 2>/dev/null || tr
 sudo cp -a /srv/apps/valentinvera-reviewer/compose.yml /var/tmp/reviewer-compose.prev.yml
 sudo cp -a /srv/apps/valentinvera-reviewer/production.env /var/tmp/reviewer-production.prev.env
 sudo cp -a /srv/apps/valentinvera-reviewer/.deploy.env /var/tmp/reviewer-deploy.prev.env
+sudo cp -a /etc/systemd/system/docker.service.d/valentinvera-reviewer-egress.conf /var/tmp/reviewer-egress-docker-dropin.prev 2>/dev/null || true
 ```
 
 Install the new files and reload the unit. `install --before-bridges` loads
@@ -281,6 +282,8 @@ installed` and does not run `nft -f`.
 sudo install -m 0755 deploy/egress/host-rules.sh /usr/local/sbin/valentinvera-reviewer-egress
 sudo install -m 0644 deploy/egress/valentinvera-reviewer-egress.service /etc/systemd/system/valentinvera-reviewer-egress.service
 sudo install -m 0755 deploy/egress/deploy-app.sh /usr/local/sbin/deploy-app
+sudo install -D -m 0644 deploy/egress/docker.service.d.conf \
+  /etc/systemd/system/docker.service.d/valentinvera-reviewer-egress.conf
 sudo systemctl daemon-reload
 sudo systemctl enable valentinvera-reviewer-egress.service
 sudo systemctl restart valentinvera-reviewer-egress.service
@@ -310,12 +313,16 @@ that unsets `HTTPS_PROXY`, `HTTP_PROXY`, and `ALL_PROXY` for the loopback
 installed. Do not enable either. This unit loads `inet reviewer_egress` and
 `bridge reviewer_egress`. Docker and Tailscale rewrites do not delete a
 separate nft table. A reboot drops the tables. The enabled unit loads them
-again before `docker.service`, and the app container's `unless-stopped`
-policy starts it after that. `restart` of the unit is safe while the tables
-match. A table that does not match is left in place and the command fails.
+again before `docker.service`. Docker requires that unit, so the daemon and
+the `unless-stopped` app stay down if the rules are not installed. `restart`
+of the egress unit is safe while the tables match. A table that does not
+match is left in place and the command fails. Do not restart Docker while
+applying this drop-in. The next start of Docker is what uses it.
 
 If `restart` or `/health` fails, restore the snapshotted binary, unit,
-compose file, and env files, then `systemctl daemon-reload`. Do not start the
+compose file, and env files, remove
+`/etc/systemd/system/docker.service.d/valentinvera-reviewer-egress.conf`,
+then `systemctl daemon-reload`. Do not restart Docker and do not start the
 previous unit: that oneshot refuses while the tables exist and does not
 delete them. Bring the previous compose file back and start the previous app
 image. `/usr/local/sbin/reviewer-egress-rollback` is the full activation
