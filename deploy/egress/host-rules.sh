@@ -16,6 +16,7 @@ ingress_upstream=""
 ingress_port=""
 fixture_ip=""
 fixture_port=""
+dns_sink=""
 app_network=""
 egress_network=""
 ingress_network=""
@@ -28,7 +29,7 @@ docker_cmd="${EGRESS_DOCKER:-docker}"
 lock_dir="${EGRESS_LOCK_DIR:-/run/lock}"
 
 usage() {
-  echo "usage: host-rules.sh {install|status|rollback} [--table NAME] [--app-bridge IF] [--egress-bridge IF] [--ingress-bridge IF] [--publish-bridge IF] [--proxy-ip ADDR] [--ingress-relay ADDR] [--ingress-upstream ADDR] [--ingress-port PORT] [--fixture-ip ADDR] [--fixture-port PORT] [--app-network NAME] [--egress-network NAME] [--ingress-network NAME] [--publish-network NAME] [--if-bridges-present] [--confirm-stopped]" >&2
+  echo "usage: host-rules.sh {install|status|rollback} [--table NAME] [--app-bridge IF] [--egress-bridge IF] [--ingress-bridge IF] [--publish-bridge IF] [--proxy-ip ADDR] [--ingress-relay ADDR] [--ingress-upstream ADDR] [--ingress-port PORT] [--fixture-ip ADDR] [--fixture-port PORT] [--dns-sink ADDR] [--app-network NAME] [--egress-network NAME] [--ingress-network NAME] [--publish-network NAME] [--if-bridges-present] [--confirm-stopped]" >&2
   exit 1
 }
 
@@ -45,6 +46,7 @@ while [ $# -gt 0 ]; do
     --ingress-port) ingress_port="$2"; shift 2 ;;
     --fixture-ip) fixture_ip="$2"; shift 2 ;;
     --fixture-port) fixture_port="$2"; shift 2 ;;
+    --dns-sink) dns_sink="$2"; shift 2 ;;
     --proxy-ip) proxy_ip="$2"; shift 2 ;;
     --app-network) app_network="$2"; shift 2 ;;
     --egress-network) egress_network="$2"; shift 2 ;;
@@ -204,6 +206,28 @@ if [ -n "$fixture_ip" ] || [ -n "$fixture_port" ]; then
   fixture_bridge="    meta ibrname \"${egress_bridge}\" ether type ip ip daddr ${fixture_ip} tcp dport ${fixture_port} counter accept"
 fi
 
+dns_inet=""
+dns_bridge=""
+if [ -n "$dns_sink" ]; then
+  stage_name "$table" '^reviewer_egress_s[0-9a-f]{6}$' || {
+    echo "refusing dns sink exception outside a stage table" >&2
+    exit 1
+  }
+  printf '%s\n' "$dns_sink" | awk -F. -v proxy="$proxy_ip" 'BEGIN { ok=0 }
+    {
+      split(proxy, p, ".")
+      if ($1 == 172 && $2 == 30 && $4 == 9 && $3 == p[3] && $3+0 >= 128 && $3+0 <= 251 && $3+0 != 208 && $3+0 != 209 && $3+0 != 210 && $3+0 != 216 && $3+0 != 217 && $3+0 != 218) ok = 1
+    }
+    END { exit ok ? 0 : 1 }' || {
+    echo "refusing dns sink $dns_sink" >&2
+    exit 1
+  }
+  dns_inet="    iifname \"${app_bridge}\" ip daddr ${dns_sink} udp dport 53 counter accept
+    iifname \"${app_bridge}\" ip daddr ${dns_sink} tcp dport 53 counter accept"
+  dns_bridge="    meta ibrname \"${app_bridge}\" ether type ip ip daddr ${dns_sink} udp dport 53 counter accept
+    meta ibrname \"${app_bridge}\" ether type ip ip daddr ${dns_sink} tcp dport 53 counter accept"
+fi
+
 bridge_present() {
   "${EGRESS_IP:-ip}" link show "$1" >/dev/null 2>&1
 }
@@ -263,6 +287,7 @@ table inet ${table} {
     iifname "${ingress_bridge}" meta nfproto ipv6 counter drop
     iifname "${app_bridge}" ct state established,related counter accept
     iifname "${app_bridge}" ip daddr ${proxy_ip} tcp dport 3128 counter accept
+${dns_inet}
     iifname "${app_bridge}" counter drop
     iifname "${egress_bridge}" ct state established,related counter accept
 ${fixture_inet}
@@ -302,6 +327,7 @@ table bridge ${table} {
     meta ibrname "${ingress_bridge}" ether type ip6 counter drop
     meta ibrname "${app_bridge}" ether type ip ct state established,related counter accept
     meta ibrname "${app_bridge}" ether type ip ip daddr ${proxy_ip} tcp dport 3128 counter accept
+${dns_bridge}
     meta ibrname "${app_bridge}" ether type ip counter drop
     meta ibrname "${egress_bridge}" ether type ip ct state established,related counter accept
 ${fixture_bridge}
@@ -378,6 +404,12 @@ status_rules() {
   if [ -n "$fixture_ip" ]; then
     if ! printf '%s\n' "$listed" | grep -q -F "ip daddr ${fixture_ip} tcp dport ${fixture_port}"; then
       echo "table ${table} is missing the stage fixture" >&2
+      exit 1
+    fi
+  fi
+  if [ -n "$dns_sink" ]; then
+    if ! printf '%s\n' "$listed" | grep -q -F "ip daddr ${dns_sink} udp dport 53" || ! printf '%s\n' "$listed" | grep -q -F "ip daddr ${dns_sink} tcp dport 53"; then
+      echo "table ${table} is missing the stage dns sink" >&2
       exit 1
     fi
   fi

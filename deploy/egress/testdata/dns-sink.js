@@ -19,9 +19,20 @@ function qname(buf) {
   return labels.join(".").toLowerCase()
 }
 
+function fail(kind, error) {
+  process.stderr.write(
+    `${kind} ${(error && error.code) || "UNKNOWN"} ${(error && error.message) || error}\n`,
+  )
+  process.exit(1)
+}
+
 function respond(query) {
   const name = qname(query)
-  fs.appendFileSync(logPath, `${name}\n`)
+  try {
+    fs.appendFileSync(logPath, `${name}\n`)
+  } catch (error) {
+    fail("log", error)
+  }
   const header = Buffer.from(query.subarray(0, 12))
   const question = query.subarray(12)
   const refused = name !== canary
@@ -45,10 +56,13 @@ function respond(query) {
 }
 
 const udp = dgram.createSocket("udp4")
+udp.on("error", (error) => fail("udp", error))
 udp.on("message", (msg, rinfo) => {
   udp.send(respond(msg), rinfo.port, rinfo.address)
 })
-udp.bind(port, "0.0.0.0")
+udp.bind(port, "0.0.0.0", () => {
+  process.stdout.write(`listening udp ${udp.address().port}\n`)
+})
 
 const tcp = net.createServer((socket) => {
   const chunks = []
@@ -65,4 +79,7 @@ const tcp = net.createServer((socket) => {
     socket.end(framed)
   })
 })
-tcp.listen(port, "0.0.0.0")
+tcp.on("error", (error) => fail("tcp", error))
+tcp.listen(port, "0.0.0.0", () => {
+  process.stdout.write(`listening tcp ${tcp.address().port}\n`)
+})

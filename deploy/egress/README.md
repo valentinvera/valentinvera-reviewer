@@ -49,20 +49,27 @@ show that the network controls work.
   that does not arrive on one of the four stage bridges is left to the later
   chains.
 
-| Bridge  | To the host                                                                                       | New flow that stays allowed                                                                                  | Reply                      | Everything else on that bridge                                                                 |
-| ------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | -------------------------- | ---------------------------------------------------------------------------------------------- |
-| App     | IPv6 dropped; established IPv4 kept; other IPv4 dropped                                           | TCP to the proxy on port 3128                                                                                | established conntrack only | dropped, including IPv6 and a new flow whose source port is 3128                               |
-| Ingress | IPv4 and IPv6 dropped, including an established session from the host                             | TCP from the relay `.2` to the app `.10` on the one listen port                                              | established conntrack only | dropped, including a new session from the app to the relay and a new flow from the listen port |
-| Publish | IPv6 dropped; established IPv4 kept; other new IPv4 dropped                                       | none                                                                                                         | established conntrack only | dropped, including IPv6 and a new flow whose source port is the listen port                    |
-| Egress  | inet INPUT drops host-local IPv4 except an established session. Bridge INPUT is a different hook. | Routed TCP 443 only after the bogon drop. Same-bridge TCP 443, and a stage fixture on 8443 before that drop. | established conntrack only | other new IPv4 and IPv6 dropped. No source-port accept.                                        |
+| Bridge  | To the host                                                                                       | New flow that stays allowed                                                                                   | Reply                      | Everything else on that bridge                                                                 |
+| ------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | -------------------------- | ---------------------------------------------------------------------------------------------- |
+| App     | IPv6 dropped; established IPv4 kept; other IPv4 dropped                                           | TCP to the proxy on port 3128. A stage table also accepts UDP and TCP port 53 to that stage's sink `.9` only. | established conntrack only | dropped, including IPv6 and a new flow whose source port is 3128                               |
+| Ingress | IPv4 and IPv6 dropped, including an established session from the host                             | TCP from the relay `.2` to the app `.10` on the one listen port                                               | established conntrack only | dropped, including a new session from the app to the relay and a new flow from the listen port |
+| Publish | IPv6 dropped; established IPv4 kept; other new IPv4 dropped                                       | none                                                                                                          | established conntrack only | dropped, including IPv6 and a new flow whose source port is the listen port                    |
+| Egress  | inet INPUT drops host-local IPv4 except an established session. Bridge INPUT is a different hook. | Routed TCP 443 only after the bogon drop. Same-bridge TCP 443, and a stage fixture on 8443 before that drop.  | established conntrack only | other new IPv4 and IPv6 dropped. No source-port accept.                                        |
 
 A source port does not prove an established reply. The bridge rules accept
 `ct state established,related` and the directional new flows above. They do
 not accept a new flow because it comes from port 3128, port 443, or the listen
-port. Production install does not pass the fixture address, so port 8443 is
-not allowed there. The fixture address is inside `172.16.0.0/12`, and the
-stage exception is placed before the bogon drop so the quiet oracle can still
-reach it after the rules are installed.
+port. Production install does not pass the fixture address or the DNS sink,
+so port 8443 and the sink's port 53 are not allowed there. The fixture
+address is inside `172.16.0.0/12`, and the stage exception is placed before
+the bogon drop so the quiet oracle can still reach it after the rules are
+installed. The stage DNS sink is a container on the app bridge. Without an
+exception, that bridge drops the client's lookup before it arrives. The stage
+table accepts only the sink address `172.30.<octet>.9` on UDP and TCP port 53.
+The sink runs as uid 10001 and sets `net.ipv4.ip_unprivileged_port_start=0`
+in its own network namespace so it can bind port 53. It does not add
+`NET_BIND_SERVICE`. A failed bind exits. The production app's only configured
+resolver remains `127.0.0.1`.
 
 Bridge INPUT and inet INPUT are not the same decision. Bridge INPUT sees a
 frame whose Ethernet destination is that bridge. On the egress bridge, the

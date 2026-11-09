@@ -384,11 +384,15 @@ require_tools() {
   need od
 }
 
+stop_project_containers() {
+  timeout 60 "$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" --profile oracle stop
+}
+
 stage_fail() {
   echo "FAIL: $1" >&2
   echo "stopping staged containers; networks, files, and nft tables stay" >&2
   if [ -n "${env_file:-}" ] && [ -f "$env_file" ]; then
-    timeout 60 "$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" stop >&2 || true
+    stop_project_containers >&2 || true
   fi
   print_inventory || true
   exit 1
@@ -632,6 +636,7 @@ EOF
   client_exec 20 https "https://example.com/" && stage_fail "example.com was allowed"
   client_exec 20 https "https://idle.fixture:8443/" | grep -q '^200 ' || stage_fail "fixture handshake"
   quiet_tunnel "quiet tunnel before nft"
+  DNS_SINK_IP=$(awk -F= '/^DNS_SINK_IP=/{ print $2 }' "$env_file")
   timeout 30 "$root/host-rules.sh" install \
     --table "$(plan_get TABLE)" \
     --app-bridge "$(plan_get APP_BRIDGE)" \
@@ -644,6 +649,7 @@ EOF
     --ingress-port 8080 \
     --fixture-ip "$(plan_get FIXTURE_IP)" \
     --fixture-port 8443 \
+    --dns-sink "$DNS_SINK_IP" \
     --app-network "$(plan_get APP_NETWORK)" \
     --egress-network "$(plan_get EGRESS_NETWORK)" \
     --ingress-network "$(plan_get INGRESS_NETWORK)" \
@@ -915,8 +921,8 @@ EOF
   run_in "$client_id" 15 https "https://idle.fixture:8443/redir"
   redirect_status=$(awk '{ print $1; exit }' "$stage_dir/last.out")
   run_in "$client_id" 15 https "https://blocked.fixture:8443/nope"
-  if [ "$redirect_status" = "302" ] && grep -q '^403 ' "$stage_dir/last.out"; then
-    record_case redirect PASS "fixture returned 302 and the proxy refused the new CONNECT with 403 $(out_detail)"
+  if [ "$redirect_status" = "302" ] && [ "$run_code" -ne 0 ] && grep -q '403' "$stage_dir/last.err" && grep -q 'Proxy refused to open a tunnel' "$stage_dir/last.err"; then
+    record_case redirect PASS "fixture returned 302 and the proxy refused the new CONNECT with 403 $(err_detail)"
   elif [ "$run_code" -eq 0 ]; then
     record_case redirect ESCAPE "blocked fixture request succeeded $(out_detail)"
   else
@@ -1010,7 +1016,7 @@ stop_stage() {
     echo "env file is missing; not guessing a project" >&2
     exit 1
   }
-  timeout 60 "$docker_cmd" compose --env-file "$env_file" -f "$root/compose.yml" -f "$root/compose.test.yml" stop
+  stop_project_containers
   echo "stopped containers for $(plan_get PROJECT)"
   echo "nft inet $(plan_get TABLE) was not removed"
   print_inventory

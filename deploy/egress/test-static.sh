@@ -186,6 +186,8 @@ if "tcp sport" in rules:
     raise SystemExit("a source port is accepted")
 if "8443" in rules:
     raise SystemExit("rules without a fixture flag include port 8443")
+if "dport 53" in rules:
+    raise SystemExit("rules without a dns sink accept port 53")
 if 'iifname "br-vvr-sabcdefp" tcp dport' in rules:
     raise SystemExit("publish bridge allows a new destination")
 # Ingress input drops before any accept of that interface in the input chain.
@@ -278,9 +280,65 @@ fi
 # shellcheck disable=SC2086
 "$root/host-rules.sh" install $rules_args --fixture-ip 172.30.144.10 --fixture-port 443 >/dev/null 2>"$work/fixture-port.err" && fail "fixture port 443 was accepted"
 grep -q 'refusing fixture port' "$work/fixture-port.err" || fail "fixture port refusal missing"
-if grep -q '8443\|fixture-ip' "$root/valentinvera-reviewer-egress.service"; then
-  fail "production unit includes the fixture"
+if grep -q '8443\|fixture-ip\|dns-sink\|dport 53' "$root/valentinvera-reviewer-egress.service"; then
+  fail "production unit includes a stage exception"
 fi
+: > "$NFT_LOG"
+# shellcheck disable=SC2086
+"$root/host-rules.sh" install $rules_args --dns-sink 172.30.143.9 >/dev/null
+python3 - "$NFT_LOG" <<'PY' || fail "stage dns sink exception is not exact"
+import sys
+text = open(sys.argv[1]).read()
+start = text.find("\ntable inet ")
+second = text.find("\ntable inet ", start + 1)
+rules = text[start:] if second < 0 else text[start:second]
+inet, bridge_table = rules.split("table bridge", 1)
+forwards = {
+    "inet": inet.split("chain forward", 1)[1],
+    "bridge": bridge_table.split("chain forward", 1)[1],
+}
+prefixes = {
+    "inet": 'iifname "br-vvr-sabcdefa"',
+    "bridge": 'meta ibrname "br-vvr-sabcdefa" ether type ip',
+}
+for family, forward in forwards.items():
+    prefix = prefixes[family]
+    udp = forward.find(prefix + " ip daddr 172.30.143.9 udp dport 53 counter accept")
+    tcp = forward.find(prefix + " ip daddr 172.30.143.9 tcp dport 53 counter accept")
+    proxy = forward.find(prefix + " ip daddr 172.30.143.2 tcp dport 3128 counter accept")
+    drop = forward.find(prefix + " counter drop")
+    if not (0 <= proxy < udp < tcp < drop):
+        raise SystemExit(family + " dns exception is not between the proxy accept and the app drop")
+for other in ("br-vvr-sabcdefe", "br-vvr-sabcdefi", "br-vvr-sabcdefp"):
+    if "ip daddr 172.30.143.9" in "\n".join(line for line in rules.splitlines() if other in line):
+        raise SystemExit("dns sink exception is not limited to the app bridge")
+if rules.count("udp dport 53") != 2 or rules.count("tcp dport 53") != 2:
+    raise SystemExit("dns port 53 is not exactly one inet and one bridge pair")
+PY
+: > "$NFT_LOG"
+"$root/host-rules.sh" install \
+  --table reviewer_egress \
+  --app-bridge br-vvr-app \
+  --egress-bridge br-vvr-egress \
+  --ingress-bridge br-vvr-ingress \
+  --publish-bridge br-vvr-publish \
+  --proxy-ip 172.30.208.2 \
+  --ingress-relay 172.30.219.2 \
+  --ingress-upstream 172.30.219.10 \
+  --ingress-port 3000 \
+  --dns-sink 172.30.208.9 >/dev/null 2>"$work/dns-prod.err" && fail "production table accepted a dns sink"
+grep -q 'refusing dns sink exception outside a stage table' "$work/dns-prod.err" || fail "dns sink refusal missing"
+if grep -q '^-f ' "$NFT_LOG"; then
+  fail "refused dns sink still rendered nft"
+fi
+: > "$NFT_LOG"
+# shellcheck disable=SC2086
+"$root/host-rules.sh" install $rules_args --dns-sink 172.30.143.8 >/dev/null 2>"$work/dns-host.err" && fail "a non-sink address was accepted"
+grep -q 'refusing dns sink' "$work/dns-host.err" || fail "wrong sink address was not refused"
+: > "$NFT_LOG"
+# shellcheck disable=SC2086
+"$root/host-rules.sh" install $rules_args --dns-sink 172.30.144.9 >/dev/null 2>"$work/dns-octet.err" && fail "a sink on another subnet was accepted"
+grep -q 'refusing dns sink' "$work/dns-octet.err" || fail "cross-subnet sink was not refused"
 if ! grep -q 'quiet tunnel after nft' "$root/host-stage.sh"; then
   fail "quiet tunnel is not repeated after nft"
 fi
@@ -301,6 +359,38 @@ if grep -n 'nsenter' "$root/host-stage.sh" >/dev/null; then
 fi
 if grep -n 'allow-fixture-prefix' "$root/host-stage.sh" >/dev/null; then
   fail "the host harness enables the fixture namespace prefix"
+fi
+if grep -F -q "grep -q '^403 ' \"\$stage_dir/last.out\"" "$root/host-stage.sh"; then
+  fail "redirect still requires a 403 status line on stdout"
+fi
+grep -q 'Proxy refused to open a tunnel' "$root/host-stage.sh" || fail "redirect does not check the proxy 403"
+grep -q '403' "$root/host-stage.sh" || fail "redirect does not keep the 403 cause"
+redir_err="$work/redir.err"
+printf '%s\n' '302 Found' > "$work/redir.out"
+printf '%s\n' 'error: Proxy refused to open a tunnel: 403 Forbidden' > "$redir_err"
+grep -q '403' "$redir_err" || fail "sample proxy rejection has no 403"
+grep -q 'Proxy refused to open a tunnel' "$redir_err" || fail "sample proxy rejection has no cause"
+if grep -q '^403 ' "$work/redir.out"; then
+  fail "sample stdout was treated as the proxy status"
+fi
+stop_lines=$(awk '/compose --env-file/ && / stop$/ { print }' "$root/host-stage.sh")
+[ -n "$stop_lines" ] || fail "project stop is missing"
+[ "$(grep -c 'stop_project_containers' "$root/host-stage.sh")" -ge 3 ] || fail "failure and stop do not share the project stop"
+printf '%s\n' "$stop_lines" | while IFS= read -r line; do
+  printf '%s\n' "$line" | grep -q -- '--profile oracle' || {
+    echo "FAIL: a project stop omits the oracle profile: $line" >&2
+    exit 1
+  }
+  printf '%s\n' "$line" | grep -q -- '--env-file' || {
+    echo "FAIL: a project stop has no env file: $line" >&2
+    exit 1
+  }
+done
+if grep -q 'docker stop' "$root/host-stage.sh"; then
+  fail "stop uses an unscoped docker stop"
+fi
+if awk '/stop proxy/ { print }' "$root/host-stage.sh" | grep -q -- '--profile oracle'; then
+  fail "stopping the proxy also selects the oracle profile"
 fi
 grep -q 'stage-route.sh' "$root/host-stage.sh" || fail "the stage route helper is not used"
 grep -q -- '--net=/proc/self/fd/' "$root/stage-route.sh" || fail "the route helper does not enter a pinned descriptor"
@@ -455,6 +545,7 @@ assert ports[0]["host_ip"] == "127.0.0.1"
 assert int(ports[0]["target"]) == 3000
 assert set(ingress["networks"]) == {"ingress", "publish"}
 assert app["dns"] == ["127.0.0.1"], app.get("dns")
+assert "dns" not in cfg["services"]
 PY
 
 echo "== ingress relay"
