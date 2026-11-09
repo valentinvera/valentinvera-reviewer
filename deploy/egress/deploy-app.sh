@@ -65,24 +65,23 @@ previous_image=$(env_get REVIEWER_IMAGE)
 
 write_image() {
   next=$1
-  tmp=$(mktemp)
+  dir=$(dirname "$env_file")
+  tmp=$(mktemp "$dir/.production.env.XXXXXX")
   awk -F= -v image="$next" '
     $1 == "REVIEWER_IMAGE" { print "REVIEWER_IMAGE=" image; next }
     { print }
   ' "$env_file" > "$tmp"
-  grep -q "^REVIEWER_IMAGE=${next}$" "$tmp" || {
-    echo "REVIEWER_IMAGE was not updated" >&2
+  if ! grep -q "^REVIEWER_IMAGE=${next}$" "$tmp" || ! grep -q '^REVIEWER_BACKUP_DIR=' "$tmp"; then
+    echo "refusing to replace production.env with an incomplete file" >&2
     rm -f "$tmp"
     exit 1
-  }
-  grep -q '^REVIEWER_BACKUP_DIR=' "$tmp" || {
-    echo "backup directory was dropped from the env" >&2
-    rm -f "$tmp"
-    exit 1
-  }
-  cat "$tmp" > "$env_file"
-  cat "$tmp" > "$deploy_env"
-  rm -f "$tmp"
+  fi
+  chmod --reference="$env_file" "$tmp"
+  deploy_tmp=$(mktemp "$dir/.deploy.env.XXXXXX")
+  cp "$tmp" "$deploy_tmp"
+  chmod --reference="$env_file" "$deploy_tmp"
+  mv "$deploy_tmp" "$deploy_env"
+  mv "$tmp" "$env_file"
 }
 
 compose() {
