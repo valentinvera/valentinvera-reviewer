@@ -4,6 +4,8 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+# shellcheck source=dns-reply.sh
+. "$root/dns-reply.sh"
 work=$(mktemp -d)
 keep="$work"
 echo "static work directory left at $keep"
@@ -14,7 +16,7 @@ fail() {
 }
 
 echo "== syntax"
-for script in render-squid-conf.sh proxy-entrypoint.sh app-entrypoint.sh ingress-entrypoint.sh host-rules.sh stage-perms.sh host-stage.sh stage-route.sh pack-bundle.sh; do
+for script in render-squid-conf.sh proxy-entrypoint.sh app-entrypoint.sh ingress-entrypoint.sh host-rules.sh stage-perms.sh host-stage.sh stage-route.sh pack-bundle.sh dns-reply.sh; do
   sh -n "$root/$script"
 done
 
@@ -394,7 +396,7 @@ if awk '/stop proxy/ { print }' "$root/host-stage.sh" | grep -q -- '--profile or
 fi
 grep -q 'stage-route.sh' "$root/host-stage.sh" || fail "the stage route helper is not used"
 grep -q -- '--net=/proc/self/fd/' "$root/stage-route.sh" || fail "the route helper does not enter a pinned descriptor"
-for label in sport8080-proof sport8080-relay direct-tcp-proxy443 proxy-false-fixture dns-udp-127.0.0.11 dns-tcp-sink dns-udp-external dns-host-gateway host-local-443 udp-quic-443 private-10 metadata-link-local cgnat-tailscale-range ipv6-disabled redirect cold-neighbor post-rule-opencode proxy-down relay-egress; do
+for label in sport8080-proof sport8080-relay direct-tcp-proxy443 proxy-false-fixture dns-stub-canary dns-udp-127.0.0.11 dns-tcp-sink dns-udp-external dns-host-gateway host-local-443 udp-quic-443 private-10 metadata-link-local cgnat-tailscale-range ipv6-disabled redirect cold-neighbor post-rule-opencode proxy-down relay-egress; do
   grep -q "$label" "$root/host-stage.sh" || fail "missing case $label"
 done
 : > "$NFT_LOG"
@@ -844,6 +846,40 @@ route_ip=$(bun "$root/testdata/client.js" route-ip 127.0.0.1 9 | tr -d "[:space:
 [ "$route_ip" = "127.0.0.1" ] || fail "route-ip returned ${route_ip}"
 echo "route-ip returned 127.0.0.1 after connect"
 
+echo "== dns reply fields"
+if grep -nE 'grep (-q )?['"'"'\"]ANSWER' "$root/host-stage.sh"; then
+  fail "a DNS assertion still searches for the letters ANSWER"
+fi
+grep -F -q '[ "$dns_rcode" = 0 ] && [ "$dns_answers" = 1 ] && [ "$dns_addr" = 192.0.2.55 ]' "$root/host-stage.sh" || fail "canary is not an exact NOERROR answer"
+grep -F -q '[ "$dns_rcode" = 5 ] && [ "$dns_answers" = 0 ]' "$root/host-stage.sh" || fail "direct denial is not an exact REFUSED"
+grep -F -q '[ "$dns_rcode" = 2 ] && [ "$dns_answers" = 0 ]' "$root/host-stage.sh" || fail "stub denial is not an exact SERVFAIL"
+parsed=$(parse_dns_reply 'rcode=0 answers=1 a=192.0.2.55') || fail "canary reply did not parse"
+[ "$(printf '%s\n' "$parsed" | awk 'NR==1 { print; exit }')" = 0 ] || fail "canary rcode was not 0"
+[ "$(printf '%s\n' "$parsed" | awk 'NR==2 { print; exit }')" = 1 ] || fail "canary answer count was not 1"
+[ "$(printf '%s\n' "$parsed" | awk 'NR==3 { print; exit }')" = 192.0.2.55 ] || fail "canary address was not 192.0.2.55"
+parsed=$(parse_dns_reply 'rcode=5 answers=0 a=') || fail "REFUSED reply did not parse"
+[ "$(printf '%s\n' "$parsed" | awk 'NR==1 { print; exit }')" = 5 ] || fail "REFUSED rcode was not 5"
+[ "$(printf '%s\n' "$parsed" | awk 'NR==2 { print; exit }')" = 0 ] || fail "REFUSED still had answers"
+[ -z "$(printf '%s\n' "$parsed" | awk 'NR==3 { print; exit }')" ] || fail "REFUSED still had an address"
+parsed=$(parse_dns_reply 'rcode=2 answers=0 a=') || fail "SERVFAIL reply did not parse"
+[ "$(printf '%s\n' "$parsed" | awk 'NR==1 { print; exit }')" = 2 ] || fail "SERVFAIL rcode was not 2"
+[ "$(printf '%s\n' "$parsed" | awk 'NR==2 { print; exit }')" = 0 ] || fail "SERVFAIL still had answers"
+if parse_dns_reply 'NOANSWER rcode=5' >/dev/null 2>&1; then
+  fail "NOANSWER was parsed as a reply"
+fi
+if parse_dns_reply 'NOANSWERrcode=2' >/dev/null 2>&1; then
+  fail "a stripped NOANSWER was parsed as a reply"
+fi
+if parse_dns_reply 'ANSWER 192.0.2.55 rcode=0' >/dev/null 2>&1; then
+  fail "the old ANSWER line was parsed as a reply"
+fi
+printf '%s\n' 'NOANSWER rcode=5' | grep -q 'ANSWER' || fail "the regression sample no longer contains the old substring"
+printf '%s\n' canary.stage.test example.com canary.stage.test > "$work/queries"
+[ "$(dns_query_count "$work/queries" canary.stage.test)" = 2 ] || fail "canary log count was not exact"
+[ "$(dns_query_count "$work/queries" example.com)" = 1 ] || fail "denied-name log count was not exact"
+[ "$(dns_query_count "$work/missing-queries" example.com)" = 0 ] || fail "a missing log was not zero"
+echo "dns fields reject NOANSWER and count each question"
+
 echo "== dns sink refuses arbitrary names"
 dns_port=$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')
 dns_log="$work/dns-queries"
@@ -854,11 +890,11 @@ n=0
 canary=""
 while [ "$n" -lt 50 ]; do
   canary=$(bun "$root/testdata/client.js" dns-udp 127.0.0.1 canary.stage.test "$dns_port" 2>/dev/null || true)
-  printf '%s' "$canary" | grep -q 'ANSWER 192.0.2.55' && break
+  parse_dns_reply "$canary" >"$work/dns-canary.txt" 2>/dev/null && [ "$(awk 'NR==1' "$work/dns-canary.txt")" = 0 ] && [ "$(awk 'NR==2' "$work/dns-canary.txt")" = 1 ] && [ "$(awk 'NR==3' "$work/dns-canary.txt")" = 192.0.2.55 ] && break
   n=$((n + 1))
   sleep 0.1
 done
-printf '%s' "$canary" | grep -q 'ANSWER 192.0.2.55' || {
+parse_dns_reply "$canary" >"$work/dns-canary.txt" 2>/dev/null && [ "$(awk 'NR==1' "$work/dns-canary.txt")" = 0 ] && [ "$(awk 'NR==3' "$work/dns-canary.txt")" = 192.0.2.55 ] || {
   kill "$dns_pid" 2>/dev/null || true
   wait "$dns_pid" 2>/dev/null || true
   fail "canary was not answered by the stage sink"
@@ -867,8 +903,10 @@ refused=$(bun "$root/testdata/client.js" dns-udp 127.0.0.1 example.com "$dns_por
 tcp_refused=$(bun "$root/testdata/client.js" dns-tcp 127.0.0.1 example.com "$dns_port" 2>/dev/null || true)
 kill "$dns_pid" 2>/dev/null || true
 wait "$dns_pid" 2>/dev/null || true
-printf '%s' "$refused" | grep -q 'NOANSWER rcode=5' || fail "udp example.com was not REFUSED: $refused"
-printf '%s' "$tcp_refused" | grep -q 'NOANSWER rcode=5' || fail "tcp example.com was not REFUSED: $tcp_refused"
+parse_dns_reply "$refused" >"$work/dns-udp-refused.txt" || fail "udp example.com was not a DNS reply: $refused"
+[ "$(awk 'NR==1' "$work/dns-udp-refused.txt")" = 5 ] && [ "$(awk 'NR==2' "$work/dns-udp-refused.txt")" = 0 ] && [ -z "$(awk 'NR==3' "$work/dns-udp-refused.txt")" ] || fail "udp example.com was not REFUSED with no answers: $refused"
+parse_dns_reply "$tcp_refused" >"$work/dns-tcp-refused.txt" || fail "tcp example.com was not a DNS reply: $tcp_refused"
+[ "$(awk 'NR==1' "$work/dns-tcp-refused.txt")" = 5 ] && [ "$(awk 'NR==2' "$work/dns-tcp-refused.txt")" = 0 ] && [ -z "$(awk 'NR==3' "$work/dns-tcp-refused.txt")" ] || fail "tcp example.com was not REFUSED with no answers: $tcp_refused"
 grep -F -q -x canary.stage.test "$dns_log" || fail "canary query was not logged"
 grep -F -q -x example.com "$dns_log" || fail "example.com query was not logged"
 echo "dns sink answered the canary and refused example.com"

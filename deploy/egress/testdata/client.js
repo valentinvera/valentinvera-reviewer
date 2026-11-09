@@ -72,8 +72,13 @@ function describeDns(msg) {
   if (!msg || msg.length < 12) return "SHORT"
   const rcode = msg.readUInt16BE(2) & 0xf
   const answers = msg.readUInt16BE(6)
-  if (answers > 0) return `ANSWER ${firstA(msg)} rcode=${rcode}`
-  return `NOANSWER rcode=${rcode}`
+  const addr = answers > 0 ? firstA(msg) : ""
+  return `rcode=${rcode} answers=${answers} a=${addr}`
+}
+
+function dnsStatus(result) {
+  const match = /^rcode=(\d+) answers=(\d+) a=(.*)$/.exec(result)
+  return match !== null && match[1] === "0" && Number(match[2]) > 0 ? 0 : 1
 }
 
 if (mode === "https") {
@@ -183,7 +188,7 @@ if (mode === "dns-udp") {
   })
   sock.close()
   process.stdout.write(`${result}\n`)
-  process.exit(result.startsWith("ANSWER") ? 0 : 1)
+  process.exit(dnsStatus(result))
 }
 
 if (mode === "dns-tcp") {
@@ -217,7 +222,7 @@ if (mode === "dns-tcp") {
     socket.once("connect", () => socket.write(framed))
   })
   process.stdout.write(`${result}\n`)
-  process.exit(result.startsWith("ANSWER") ? 0 : 1)
+  process.exit(dnsStatus(result))
 }
 
 if (mode === "udp") {

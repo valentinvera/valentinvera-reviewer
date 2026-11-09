@@ -6,6 +6,8 @@
 set -eu
 
 root=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+# shellcheck source=dns-reply.sh
+. "$root/dns-reply.sh"
 action="${1:-}"
 if [ $# -gt 0 ]; then
   shift
@@ -810,24 +812,88 @@ EOF
   else
     record_case dns-system NOT-EXERCISED "canary ${canary} exit ${run_code} $(err_detail)"
   fi
-  run_in "$client_id" 8 dns-udp 127.0.0.11 example.com
-  dns_udp=$(tr -d '[:space:]' < "$stage_dir/last.out")
-  if printf '%s' "$dns_udp" | grep -q 'ANSWER'; then
-    record_case dns-udp-127.0.0.11 FAIL "stub returned an answer ${dns_udp}"
-  elif printf '%s' "$dns_udp" | grep -q 'NOANSWER rcode=5' && grep -F -q -x example.com "$stage_dir/dns/queries"; then
-    record_case dns-udp-127.0.0.11 PASS "stub forwarded example.com to the stage sink and got REFUSED"
+  query_log="$stage_dir/dns/queries"
+  before_canary=$(dns_query_count "$query_log" canary.stage.test)
+  run_in "$client_id" 8 dns-udp 127.0.0.11 canary.stage.test
+  after_canary=$(dns_query_count "$query_log" canary.stage.test)
+  if parse_dns_reply "$(awk 'NF { print; exit }' "$stage_dir/last.out")" >"$stage_dir/dns-reply.txt"; then
+    dns_rcode=$(awk 'NR==1 { print; exit }' "$stage_dir/dns-reply.txt")
+    dns_answers=$(awk 'NR==2 { print; exit }' "$stage_dir/dns-reply.txt")
+    dns_addr=$(awk 'NR==3 { print; exit }' "$stage_dir/dns-reply.txt")
   else
-    record_case dns-udp-127.0.0.11 NOT-EXERCISED "exit ${run_code} ${dns_udp} $(err_detail)"
+    dns_rcode=""
+    dns_answers=""
+    dns_addr=""
+  fi
+  if [ "$dns_rcode" = 0 ] && [ "$dns_answers" = 1 ] && [ "$dns_addr" = 192.0.2.55 ] && [ $((after_canary - before_canary)) -eq 1 ]; then
+    record_case dns-stub-canary PASS "stub at 127.0.0.11 returned NOERROR 192.0.2.55 and the sink logged that question"
+  elif [ "$dns_rcode" = 0 ] && [ "$dns_answers" = 1 ] && [ "$dns_addr" = 192.0.2.55 ]; then
+    record_case dns-stub-canary NOT-EXERCISED "stub canary was not paired with one new sink question ${before_canary}->${after_canary}"
+  elif [ "$dns_rcode" = 0 ] || [ "${dns_answers:-0}" -gt 0 ]; then
+    record_case dns-stub-canary FAIL "stub canary was not 192.0.2.55 rcode=${dns_rcode} answers=${dns_answers} a=${dns_addr}"
+  else
+    record_case dns-stub-canary NOT-EXERCISED "exit ${run_code} rcode=${dns_rcode} answers=${dns_answers} log ${before_canary}->${after_canary} $(err_detail)"
+  fi
+  before_denied=$(dns_query_count "$query_log" example.com)
+  run_in "$client_id" 8 dns-udp 127.0.0.11 example.com
+  after_denied=$(dns_query_count "$query_log" example.com)
+  if parse_dns_reply "$(awk 'NF { print; exit }' "$stage_dir/last.out")" >"$stage_dir/dns-reply.txt"; then
+    dns_rcode=$(awk 'NR==1 { print; exit }' "$stage_dir/dns-reply.txt")
+    dns_answers=$(awk 'NR==2 { print; exit }' "$stage_dir/dns-reply.txt")
+    dns_addr=$(awk 'NR==3 { print; exit }' "$stage_dir/dns-reply.txt")
+  else
+    dns_rcode=""
+    dns_answers=""
+    dns_addr=""
+  fi
+  if [ "$dns_rcode" = 2 ] && [ "$dns_answers" = 0 ] && [ -z "$dns_addr" ] && [ $((after_denied - before_denied)) -eq 1 ]; then
+    record_case dns-udp-127.0.0.11 PASS "stub forwarded example.com, the sink logged it, and Docker answered SERVFAIL with no records"
+  elif [ "$dns_rcode" = 0 ] || [ "${dns_answers:-0}" -gt 0 ]; then
+    record_case dns-udp-127.0.0.11 FAIL "stub returned an answer rcode=${dns_rcode} answers=${dns_answers} a=${dns_addr}"
+  else
+    record_case dns-udp-127.0.0.11 NOT-EXERCISED "exit ${run_code} rcode=${dns_rcode} answers=${dns_answers} log ${before_denied}->${after_denied} $(err_detail)"
   fi
   sink_ip=$(awk -F= '/^DNS_SINK_IP=/{ print $2 }' "$env_file")
-  run_in "$client_id" 8 dns-tcp "$sink_ip" example.com 53
-  dns_tcp=$(tr -d '[:space:]' < "$stage_dir/last.out")
-  if printf '%s' "$dns_tcp" | grep -q 'ANSWER'; then
-    record_case dns-tcp-sink FAIL "direct tcp to the sink answered ${dns_tcp}"
-  elif printf '%s' "$dns_tcp" | grep -q 'NOANSWER rcode=5' && grep -F -q -x example.com "$stage_dir/dns/queries"; then
-    record_case dns-tcp-sink PASS "direct tcp/53 to the stage sink was REFUSED"
+  before_direct=$(dns_query_count "$query_log" canary.stage.test)
+  run_in "$client_id" 8 dns-tcp "$sink_ip" canary.stage.test 53
+  after_direct=$(dns_query_count "$query_log" canary.stage.test)
+  if parse_dns_reply "$(awk 'NF { print; exit }' "$stage_dir/last.out")" >"$stage_dir/dns-reply.txt"; then
+    dns_rcode=$(awk 'NR==1 { print; exit }' "$stage_dir/dns-reply.txt")
+    dns_answers=$(awk 'NR==2 { print; exit }' "$stage_dir/dns-reply.txt")
+    dns_addr=$(awk 'NR==3 { print; exit }' "$stage_dir/dns-reply.txt")
   else
-    record_case dns-tcp-sink NOT-EXERCISED "exit ${run_code} ${dns_tcp} $(err_detail)"
+    dns_rcode=""
+    dns_answers=""
+    dns_addr=""
+  fi
+  if [ "$dns_rcode" != 0 ] || [ "$dns_answers" != 1 ] || [ "$dns_addr" != 192.0.2.55 ] || [ $((after_direct - before_direct)) -ne 1 ]; then
+    if [ "$dns_rcode" = 0 ] && [ "$dns_answers" = 1 ] && [ "$dns_addr" = 192.0.2.55 ]; then
+      record_case dns-tcp-sink NOT-EXERCISED "direct tcp canary was not paired with one new sink question ${before_direct}->${after_direct}"
+    elif [ "$dns_rcode" = 0 ] || [ "${dns_answers:-0}" -gt 0 ]; then
+      record_case dns-tcp-sink FAIL "direct tcp canary was not 192.0.2.55 rcode=${dns_rcode} answers=${dns_answers} a=${dns_addr}"
+    else
+      record_case dns-tcp-sink NOT-EXERCISED "canary exit ${run_code} rcode=${dns_rcode} answers=${dns_answers} log ${before_direct}->${after_direct} $(err_detail)"
+    fi
+  else
+    before_direct=$(dns_query_count "$query_log" example.com)
+    run_in "$client_id" 8 dns-tcp "$sink_ip" example.com 53
+    after_direct=$(dns_query_count "$query_log" example.com)
+    if parse_dns_reply "$(awk 'NF { print; exit }' "$stage_dir/last.out")" >"$stage_dir/dns-reply.txt"; then
+      dns_rcode=$(awk 'NR==1 { print; exit }' "$stage_dir/dns-reply.txt")
+      dns_answers=$(awk 'NR==2 { print; exit }' "$stage_dir/dns-reply.txt")
+      dns_addr=$(awk 'NR==3 { print; exit }' "$stage_dir/dns-reply.txt")
+    else
+      dns_rcode=""
+      dns_answers=""
+      dns_addr=""
+    fi
+    if [ "$dns_rcode" = 5 ] && [ "$dns_answers" = 0 ] && [ -z "$dns_addr" ] && [ $((after_direct - before_direct)) -eq 1 ]; then
+      record_case dns-tcp-sink PASS "direct tcp/53 canary was NOERROR 192.0.2.55 and example.com was REFUSED with no answers"
+    elif [ "$dns_rcode" = 0 ] || [ "${dns_answers:-0}" -gt 0 ]; then
+      record_case dns-tcp-sink FAIL "direct tcp to the sink answered rcode=${dns_rcode} answers=${dns_answers} a=${dns_addr}"
+    else
+      record_case dns-tcp-sink NOT-EXERCISED "exit ${run_code} rcode=${dns_rcode} answers=${dns_answers} log ${before_direct}->${after_direct} $(err_detail)"
+    fi
   fi
   run_in "$fixture_id" 8 direct "$(plan_get FIXTURE_IP)" 8443
   if [ "$run_code" -ne 0 ]; then
@@ -990,7 +1056,7 @@ EOF
       record_case cold-neighbor NOT-EXERCISED "arp ${flags_before}->${flags_after} exit ${run_code} counter ${before}->${after} $(err_detail)"
     fi
   fi
-  for name in sport3128-allow sport3128-proxy443 sport8080-proof sport8080-relay sport8080-gateway health-restored sport443-bind direct-tcp-proxy443 direct-tcp-fixture-ip proxy-false-fixture post-rule-opencode dns-system dns-udp-127.0.0.11 dns-tcp-sink dns-udp-external dns-tcp-external dns-host-gateway host-local-443 udp-quic-443 private-10 metadata-link-local cgnat-tailscale-range ipv6-disabled redirect cold-neighbor proxy-down proxy-restored relay-egress; do
+  for name in sport3128-allow sport3128-proxy443 sport8080-proof sport8080-relay sport8080-gateway health-restored sport443-bind direct-tcp-proxy443 direct-tcp-fixture-ip proxy-false-fixture post-rule-opencode dns-system dns-stub-canary dns-udp-127.0.0.11 dns-tcp-sink dns-udp-external dns-tcp-external dns-host-gateway host-local-443 udp-quic-443 private-10 metadata-link-local cgnat-tailscale-range ipv6-disabled redirect cold-neighbor proxy-down proxy-restored relay-egress; do
     if ! grep -q "^${name} " "$case_file"; then
       record_case "$name" NOT-EXERCISED "case was not recorded"
     fi

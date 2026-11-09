@@ -71,6 +71,18 @@ in its own network namespace so it can bind port 53. It does not add
 `NET_BIND_SERVICE`. A failed bind exits. The production app's only configured
 resolver remains `127.0.0.1`.
 
+A direct query to the sink is the sink's own answer: the canary is NOERROR
+with `192.0.2.55`, and any other name is REFUSED (rcode 5) with no answer
+records. A query to the stage client's Docker stub at `127.0.0.11` is a
+different reply. Docker 29's embedded resolver (`forwardExtDNS`) returns an
+upstream NOERROR answer unchanged, so the canary through the stub is
+`192.0.2.55` and the sink logs that question. The same function treats an
+upstream REFUSED as a reason to try the next server. The stage client has
+only the sink, so the stub discards that REFUSED and answers SERVFAIL
+(rcode 2) with no records. The question still reached the sink. SERVFAIL
+from the stub is that Docker behavior, not a second policy and not a
+successful answer.
+
 Bridge INPUT and inet INPUT are not the same decision. Bridge INPUT sees a
 frame whose Ethernet destination is that bridge. On the egress bridge, the
 proxy's route to the public internet uses the gateway MAC, so a new TCP port
