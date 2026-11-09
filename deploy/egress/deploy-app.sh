@@ -4,14 +4,31 @@
 # not delete networks, nft tables, backups, or the proxy and relay.
 set -eu
 
-sha="${1:-}"
 app_dir="${APP_DIR:-/srv/apps/valentinvera-reviewer}"
 rules="${EGRESS_RULES:-/usr/local/sbin/valentinvera-reviewer-egress}"
 docker_cmd="${EGRESS_DOCKER:-docker}"
 ready_dir="${EGRESS_READY_DIR:-/run/valentinvera-reviewer-egress}"
 curl_cmd="${EGRESS_CURL:-curl}"
+health_attempts="${EGRESS_HEALTH_ATTEMPTS:-30}"
+health_sleep="${EGRESS_HEALTH_SLEEP:-2}"
 
-if [ $# -ne 1 ] || [ -z "$sha" ]; then
+# authorized_keys ForceCommand runs this script. The client command is
+# SSH_ORIGINAL_COMMAND, not argv: "valentinvera-reviewer <sha>". The token
+# is one line on stdin. A direct "deploy-app <sha>" still uses argv.
+if [ -n "${SSH_ORIGINAL_COMMAND:-}" ]; then
+  # shellcheck disable=SC2086
+  set -- ${SSH_ORIGINAL_COMMAND}
+  if [ "${1:-}" != "valentinvera-reviewer" ] || [ $# -ne 2 ]; then
+    echo "refusing command: ${SSH_ORIGINAL_COMMAND}" >&2
+    exit 1
+  fi
+  sha=$2
+  if [ -z "${GITHUB_TOKEN:-}" ]; then
+    IFS= read -r GITHUB_TOKEN || true
+  fi
+elif [ $# -eq 1 ]; then
+  sha=$1
+else
   echo "usage: deploy-app.sh GIT_SHA" >&2
   exit 1
 fi
@@ -123,7 +140,18 @@ if ! compose --profile app up -d app; then
   restore_previous
 fi
 port=$(env_get REVIEWER_BIND_PORT)
-if ! "$curl_cmd" -fsS --max-time 20 "http://127.0.0.1:${port}/health"; then
-  restore_previous
-fi
-echo "deployed ${image}"
+attempt=0
+while [ "$attempt" -lt "$health_attempts" ]; do
+  if [ ! -f "$ready_dir/ready" ] || [ "$(tr -d '[:space:]' < "$ready_dir/ready")" != "reviewer_egress" ]; then
+    echo "egress rules are not ready; rolling back" >&2
+    restore_previous
+  fi
+  if "$curl_cmd" -fsS --max-time 5 "http://127.0.0.1:${port}/health"; then
+    echo "deployed ${image}"
+    exit 0
+  fi
+  attempt=$((attempt + 1))
+  sleep "$health_sleep"
+done
+echo "health check failed after ${health_attempts} attempts" >&2
+restore_previous

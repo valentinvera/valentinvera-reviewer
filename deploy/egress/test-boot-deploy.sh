@@ -189,27 +189,59 @@ if grep -q ' down' "$COMPOSE_LOG"; then
   fail "deploy deleted the compose project"
 fi
 
+# ForceCommand: app name + sha, token on stdin. A few failed health checks retry.
+cat > "$work/bin/curl" <<'EOF'
+#!/bin/sh
+n=0
+if [ -f "$CURL_COUNT" ]; then
+  n=$(cat "$CURL_COUNT")
+fi
+n=$((n + 1))
+printf '%s\n' "$n" > "$CURL_COUNT"
+if [ "$n" -lt 3 ]; then
+  exit 1
+fi
+exit 0
+EOF
+chmod 0755 "$work/bin/curl"
+CURL_COUNT="$work/curl.count"
+export CURL_COUNT
+: > "$COMPOSE_LOG"
+printf '%s\n' 'token' | APP_DIR="$app" EGRESS_RULES="$root/host-rules.sh" EGRESS_DOCKER="$work/bin/docker" EGRESS_CURL="$work/bin/curl" \
+  EGRESS_READY_DIR="$work/ready" EGRESS_NFT="$work/bin/nft" EGRESS_IP="$work/bin/ip" EGRESS_LOCK_DIR="$work/lock" \
+  EGRESS_HEALTH_ATTEMPTS=5 EGRESS_HEALTH_SLEEP=0 \
+  SSH_ORIGINAL_COMMAND='valentinvera-reviewer abcdef3' \
+  "$root/deploy-app.sh" >"$work/ssh.out"
+grep -q 'deployed ghcr.io/valentinvera/valentinvera-reviewer:abcdef3' "$work/ssh.out" || fail "force-command deploy did not report the image"
+ssh_image=$(awk -F= '$1=="REVIEWER_IMAGE"{print substr($0,index($0,"=")+1)}' "$app/production.env")
+[ "$ssh_image" = "ghcr.io/valentinvera/valentinvera-reviewer:abcdef3" ] || fail "force-command deploy did not keep the new image"
+if SSH_ORIGINAL_COMMAND='other abcdef4' "$root/deploy-app.sh" >/dev/null 2>"$work/ssh-refuse.err"; then
+  fail "a foreign command was accepted"
+fi
+grep -q 'refusing command' "$work/ssh-refuse.err" || fail "foreign command was not refused"
+
 # A failed health check restores the previous image and does not leave the new one.
 printf '%s\n' '#!/bin/sh' 'exit 1' > "$work/bin/curl"
 chmod 0755 "$work/bin/curl"
 : > "$COMPOSE_LOG"
 if APP_DIR="$app" EGRESS_RULES="$root/host-rules.sh" EGRESS_DOCKER="$work/bin/docker" EGRESS_CURL="$work/bin/curl" \
   EGRESS_READY_DIR="$work/ready" EGRESS_NFT="$work/bin/nft" EGRESS_IP="$work/bin/ip" EGRESS_LOCK_DIR="$work/lock" \
+  EGRESS_HEALTH_ATTEMPTS=2 EGRESS_HEALTH_SLEEP=0 \
   "$root/deploy-app.sh" abcdef2 >"$work/rollback.out" 2>"$work/rollback.err"
 then
   fail "a failed health check was treated as a deploy"
 fi
 restored=$(awk -F= '$1=="REVIEWER_IMAGE"{print substr($0,index($0,"=")+1)}' "$app/production.env")
-[ "$restored" = "ghcr.io/valentinvera/valentinvera-reviewer:abcdef1" ] || fail "rollback did not restore the previous image: $restored"
+[ "$restored" = "ghcr.io/valentinvera/valentinvera-reviewer:abcdef3" ] || fail "rollback did not restore the previous image: $restored"
 cmp "$app/production.env" "$app/.deploy.env" || fail "rollback left .deploy.env different from production.env"
-grep -q 'restoring ghcr.io/valentinvera/valentinvera-reviewer:abcdef1' "$work/rollback.err" || fail "rollback did not name the previous image"
+grep -q 'restoring ghcr.io/valentinvera/valentinvera-reviewer:abcdef3' "$work/rollback.err" || fail "rollback did not name the previous image"
 grep -q "^REVIEWER_BACKUP_DIR=$app/backups$" "$app/production.env" || fail "rollback dropped the backup directory"
 
-grep -q 'deploy/egress/deploy-app.sh' "$root/../../.github/workflows/deploy.yml" || fail "the deploy workflow does not copy deploy-app.sh"
-if grep -q 'valentinvera-reviewer ${GITHUB_SHA}' "$root/../../.github/workflows/deploy.yml"; then
-  fail "the deploy workflow still replaces the host env"
+if grep -q 'scp ' "$root/../../.github/workflows/deploy.yml"; then
+  fail "the deploy workflow still copies a script over ssh"
 fi
-grep -q 'read -r GITHUB_TOKEN' "$root/../../.github/workflows/deploy.yml" || fail "the deploy token is not read from stdin"
+grep -q 'valentinvera-reviewer ${GITHUB_SHA}' "$root/../../.github/workflows/deploy.yml" || fail "the deploy command is not the force-command app and sha"
+grep -q 'echo "$GITHUB_TOKEN" | ssh' "$root/../../.github/workflows/deploy.yml" || fail "the deploy token is not on stdin"
 grep -q 'StrictHostKeyChecking=yes' "$root/../../.github/workflows/deploy.yml" || fail "ssh host checking was removed"
 
 echo "boot order and deploy simulation passed"
