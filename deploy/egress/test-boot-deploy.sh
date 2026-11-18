@@ -265,7 +265,6 @@ host_root="$root/../host"
 sudoers="$host_root/sudoers.d/valentinvera-reviewer-egress"
 tmpfiles="$host_root/tmpfiles.d/valentinvera-reviewer-egress.conf"
 [ -f "$sudoers" ] || fail "host sudoers file is missing"
-[ "$(stat -c '%a' "$sudoers")" = "440" ] || fail "host sudoers mode is not 0440"
 grep -q 'NOPASSWD: /usr/local/sbin/valentinvera-reviewer-egress install --before-bridges --table reviewer_egress --app-bridge br-vvr-app --egress-bridge br-vvr-egress --ingress-bridge br-vvr-ingress --publish-bridge br-vvr-publish --proxy-ip 172.30.208.2 --ingress-relay 172.30.219.2 --ingress-upstream 172.30.219.10 --ingress-port 3000' "$sudoers" || fail "host sudoers argv does not match production deploy-app"
 if command -v visudo >/dev/null 2>&1; then
   visudo -cf "$sudoers" >/dev/null || fail "host sudoers failed visudo -cf"
@@ -273,6 +272,8 @@ fi
 [ -f "$tmpfiles" ] || fail "host tmpfiles entry is missing"
 grep -q 'f /run/lock/reviewer_egress.lock 0660 root deploy -' "$tmpfiles" || fail "host tmpfiles lock entry missing"
 grep -q 'sudo -n' "$root/deploy-app.sh" || fail "deploy-app does not call sudo -n when not root"
+grep -q 'install -D -m 0440 deploy/host/sudoers.d/valentinvera-reviewer-egress' "$root/README.md" || fail "README does not install sudoers as 0440"
+grep -q 'install -D -m 0644 deploy/host/tmpfiles.d/valentinvera-reviewer-egress.conf' "$root/README.md" || fail "README does not install tmpfiles.d"
 
 echo "boot order and deploy simulation passed"
 echo "work directory retained at $keep"
