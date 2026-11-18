@@ -166,11 +166,26 @@ printf 'ok\n'
 exit 0
 EOF
 chmod 0755 "$work/bin/curl"
+cat > "$work/bin/sudo" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "$SUDO_LOG"
+if [ "$1" != "-n" ]; then
+  echo "expected sudo -n" >&2
+  exit 1
+fi
+shift
+exec "$@"
+EOF
+chmod 0755 "$work/bin/sudo"
+SUDO_LOG="$work/sudo.log"
+export SUDO_LOG
+: > "$SUDO_LOG"
 
-APP_DIR="$app" EGRESS_RULES="$root/host-rules.sh" EGRESS_DOCKER="$work/bin/docker" EGRESS_CURL="$work/bin/curl" \
+PATH="$work/bin:$PATH" APP_DIR="$app" EGRESS_RULES="$root/host-rules.sh" EGRESS_DOCKER="$work/bin/docker" EGRESS_CURL="$work/bin/curl" \
   EGRESS_READY_DIR="$work/ready" EGRESS_NFT="$work/bin/nft" EGRESS_IP="$work/bin/ip" EGRESS_LOCK_DIR="$work/lock" \
   "$root/deploy-app.sh" abcdef1 >"$work/deploy.out"
 grep -q 'deployed ghcr.io/valentinvera/valentinvera-reviewer:abcdef1' "$work/deploy.out" || fail "deploy did not report the new image"
+grep -q -- "-n $root/host-rules.sh install --before-bridges" "$SUDO_LOG" || fail "deploy did not sudo -n the egress install"
 new_image=$(awk -F= '$1=="REVIEWER_IMAGE"{print substr($0,index($0,"=")+1)}' "$app/production.env")
 [ "$new_image" = "ghcr.io/valentinvera/valentinvera-reviewer:abcdef1" ] || fail "production image was not updated"
 cmp "$app/production.env" "$app/.deploy.env" || fail ".deploy.env is not the full production env"
@@ -207,11 +222,13 @@ chmod 0755 "$work/bin/curl"
 CURL_COUNT="$work/curl.count"
 export CURL_COUNT
 : > "$COMPOSE_LOG"
-printf '%s\n' 'token' | APP_DIR="$app" EGRESS_RULES="$root/host-rules.sh" EGRESS_DOCKER="$work/bin/docker" EGRESS_CURL="$work/bin/curl" \
+: > "$SUDO_LOG"
+printf '%s\n' 'token' | PATH="$work/bin:$PATH" APP_DIR="$app" EGRESS_RULES="$root/host-rules.sh" EGRESS_DOCKER="$work/bin/docker" EGRESS_CURL="$work/bin/curl" \
   EGRESS_READY_DIR="$work/ready" EGRESS_NFT="$work/bin/nft" EGRESS_IP="$work/bin/ip" EGRESS_LOCK_DIR="$work/lock" \
   EGRESS_HEALTH_ATTEMPTS=5 EGRESS_HEALTH_SLEEP=0 \
   SSH_ORIGINAL_COMMAND='valentinvera-reviewer abcdef3' \
   "$root/deploy-app.sh" >"$work/ssh.out"
+grep -q -- "-n $root/host-rules.sh install --before-bridges" "$SUDO_LOG" || fail "force-command deploy did not sudo -n the egress install"
 grep -q 'deployed ghcr.io/valentinvera/valentinvera-reviewer:abcdef3' "$work/ssh.out" || fail "force-command deploy did not report the image"
 ssh_image=$(awk -F= '$1=="REVIEWER_IMAGE"{print substr($0,index($0,"=")+1)}' "$app/production.env")
 [ "$ssh_image" = "ghcr.io/valentinvera/valentinvera-reviewer:abcdef3" ] || fail "force-command deploy did not keep the new image"
@@ -224,7 +241,7 @@ grep -q 'refusing command' "$work/ssh-refuse.err" || fail "foreign command was n
 printf '%s\n' '#!/bin/sh' 'exit 1' > "$work/bin/curl"
 chmod 0755 "$work/bin/curl"
 : > "$COMPOSE_LOG"
-if APP_DIR="$app" EGRESS_RULES="$root/host-rules.sh" EGRESS_DOCKER="$work/bin/docker" EGRESS_CURL="$work/bin/curl" \
+if PATH="$work/bin:$PATH" APP_DIR="$app" EGRESS_RULES="$root/host-rules.sh" EGRESS_DOCKER="$work/bin/docker" EGRESS_CURL="$work/bin/curl" \
   EGRESS_READY_DIR="$work/ready" EGRESS_NFT="$work/bin/nft" EGRESS_IP="$work/bin/ip" EGRESS_LOCK_DIR="$work/lock" \
   EGRESS_HEALTH_ATTEMPTS=2 EGRESS_HEALTH_SLEEP=0 \
   "$root/deploy-app.sh" abcdef2 >"$work/rollback.out" 2>"$work/rollback.err"
@@ -243,6 +260,20 @@ fi
 grep -q 'valentinvera-reviewer ${GITHUB_SHA}' "$root/../../.github/workflows/deploy.yml" || fail "the deploy command is not the force-command app and sha"
 grep -q 'echo "$GITHUB_TOKEN" | ssh' "$root/../../.github/workflows/deploy.yml" || fail "the deploy token is not on stdin"
 grep -q 'StrictHostKeyChecking=yes' "$root/../../.github/workflows/deploy.yml" || fail "ssh host checking was removed"
+
+host_root="$root/../host"
+sudoers="$host_root/sudoers.d/valentinvera-reviewer-egress"
+tmpfiles="$host_root/tmpfiles.d/valentinvera-reviewer-egress.conf"
+[ -f "$sudoers" ] || fail "host sudoers file is missing"
+grep -q 'NOPASSWD: /usr/local/sbin/valentinvera-reviewer-egress install --before-bridges --table reviewer_egress --app-bridge br-vvr-app --egress-bridge br-vvr-egress --ingress-bridge br-vvr-ingress --publish-bridge br-vvr-publish --proxy-ip 172.30.208.2 --ingress-relay 172.30.219.2 --ingress-upstream 172.30.219.10 --ingress-port 3000' "$sudoers" || fail "host sudoers argv does not match production deploy-app"
+if command -v visudo >/dev/null 2>&1; then
+  visudo -cf "$sudoers" >/dev/null || fail "host sudoers failed visudo -cf"
+fi
+[ -f "$tmpfiles" ] || fail "host tmpfiles entry is missing"
+grep -q 'f /run/lock/reviewer_egress.lock 0660 root deploy -' "$tmpfiles" || fail "host tmpfiles lock entry missing"
+grep -q 'sudo -n' "$root/deploy-app.sh" || fail "deploy-app does not call sudo -n when not root"
+grep -q 'install -D -m 0440 deploy/host/sudoers.d/valentinvera-reviewer-egress' "$root/README.md" || fail "README does not install sudoers as 0440"
+grep -q 'install -D -m 0644 deploy/host/tmpfiles.d/valentinvera-reviewer-egress.conf' "$root/README.md" || fail "README does not install tmpfiles.d"
 
 echo "boot order and deploy simulation passed"
 echo "work directory retained at $keep"

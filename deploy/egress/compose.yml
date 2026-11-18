@@ -29,7 +29,8 @@ services:
     networks:
       app:
         ipv4_address: ${PROXY_IP}
-      egress: {}
+      egress:
+        ipv4_address: ${PROXY_EGRESS_IP:?set PROXY_EGRESS_IP}
     restart: unless-stopped
 
   app:
@@ -62,7 +63,8 @@ services:
     tmpfs:
       - /tmp:size=64m,mode=1777,noexec,nosuid,nodev
     networks:
-      app: {}
+      app:
+        ipv4_address: ${APP_IP:?set APP_IP}
       ingress:
         ipv4_address: ${INGRESS_UPSTREAM_IP:?set INGRESS_UPSTREAM_IP}
     depends_on:
@@ -93,7 +95,8 @@ services:
     networks:
       ingress:
         ipv4_address: ${INGRESS_RELAY_IP:?set INGRESS_RELAY_IP}
-      publish: {}
+      publish:
+        ipv4_address: ${INGRESS_PUBLISH_IP:?set INGRESS_PUBLISH_IP}
     restart: unless-stopped
 
 networks:
@@ -111,11 +114,11 @@ networks:
       config:
         - subnet: ${APP_SUBNET}
           gateway: ${APP_GATEWAY:?set APP_GATEWAY}
-          # Keep PROXY_IP out of the dynamic pool. restart:unless-stopped
-          # ignores depends_on, so the app can start before the proxy and
-          # would otherwise be handed this address.
-          aux_addresses:
-            proxy: ${PROXY_IP}
+          # Dynamic pool is the upper /25. Fixed service addresses (.2 proxy,
+          # .3 app, and stage .8/.9) sit below it so a boot race cannot steal
+          # them. Do not use aux_addresses: on Docker 29 that reserves the IP
+          # and then refuses the matching ipv4_address as already in use.
+          ip_range: ${APP_IP_RANGE:?set APP_IP_RANGE}
   egress:
     name: ${EGRESS_NETWORK_NAME:?set EGRESS_NETWORK_NAME}
     internal: false
@@ -127,6 +130,7 @@ networks:
       config:
         - subnet: ${EGRESS_SUBNET:?set EGRESS_SUBNET}
           gateway: ${EGRESS_GATEWAY:?set EGRESS_GATEWAY}
+          ip_range: ${EGRESS_IP_RANGE:?set EGRESS_IP_RANGE}
   ingress:
     name: ${INGRESS_NETWORK_NAME:?set INGRESS_NETWORK_NAME}
     internal: true
@@ -138,11 +142,7 @@ networks:
       config:
         - subnet: ${INGRESS_SUBNET:?set INGRESS_SUBNET}
           gateway: ${INGRESS_GATEWAY:?set INGRESS_GATEWAY}
-          # Both ends of the ingress hop use fixed addresses. Reserve them
-          # so a future dynamic attachment cannot claim either one.
-          aux_addresses:
-            relay: ${INGRESS_RELAY_IP}
-            upstream: ${INGRESS_UPSTREAM_IP}
+          ip_range: ${INGRESS_IP_RANGE:?set INGRESS_IP_RANGE}
   publish:
     name: ${PUBLISH_NETWORK_NAME:?set PUBLISH_NETWORK_NAME}
     internal: false
@@ -155,3 +155,4 @@ networks:
       config:
         - subnet: ${PUBLISH_SUBNET:?set PUBLISH_SUBNET}
           gateway: ${PUBLISH_GATEWAY:?set PUBLISH_GATEWAY}
+          ip_range: ${PUBLISH_IP_RANGE:?set PUBLISH_IP_RANGE}

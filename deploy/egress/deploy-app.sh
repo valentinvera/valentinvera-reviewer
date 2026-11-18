@@ -67,7 +67,7 @@ env_get() {
   awk -F= -v key="$1" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$env_file"
 }
 
-for key in EGRESS_PROJECT_NAME EGRESS_IMAGE_TAG REVIEWER_IMAGE REVIEWER_BIND_PORT REVIEWER_DATA_DIR REVIEWER_BACKUP_DIR REVIEWER_SECRETS_DIR PROXY_IP APP_BRIDGE EGRESS_BRIDGE INGRESS_BRIDGE PUBLISH_BRIDGE INGRESS_RELAY_IP INGRESS_UPSTREAM_IP INGRESS_LISTEN_PORT; do
+for key in EGRESS_PROJECT_NAME EGRESS_IMAGE_TAG REVIEWER_IMAGE REVIEWER_BIND_PORT REVIEWER_DATA_DIR REVIEWER_BACKUP_DIR REVIEWER_SECRETS_DIR PROXY_IP APP_IP APP_IP_RANGE PROXY_EGRESS_IP EGRESS_IP_RANGE APP_BRIDGE EGRESS_BRIDGE INGRESS_BRIDGE PUBLISH_BRIDGE INGRESS_RELAY_IP INGRESS_UPSTREAM_IP INGRESS_IP_RANGE INGRESS_PUBLISH_IP PUBLISH_IP_RANGE INGRESS_LISTEN_PORT; do
   if [ -z "$(env_get "$key")" ]; then
     echo "production.env is missing $key" >&2
     exit 1
@@ -118,7 +118,17 @@ fi
 
 "$docker_cmd" pull "$image"
 
-"$rules" install --before-bridges \
+# ForceCommand runs as deploy, which cannot nft. Use a narrow NOPASSWD sudoers
+# entry for this exact argv when not already root (see deploy/host/sudoers.d).
+run_egress() {
+  if [ "$(id -u)" -eq 0 ]; then
+    "$rules" "$@"
+  else
+    sudo -n "$rules" "$@"
+  fi
+}
+
+run_egress install --before-bridges \
   --table reviewer_egress \
   --app-bridge "$(env_get APP_BRIDGE)" \
   --egress-bridge "$(env_get EGRESS_BRIDGE)" \
