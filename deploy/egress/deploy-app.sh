@@ -93,12 +93,16 @@ write_image() {
     rm -f "$tmp"
     exit 1
   fi
-  chmod --reference="$env_file" "$tmp"
-  deploy_tmp=$(mktemp "$dir/.deploy.env.XXXXXX")
-  cp "$tmp" "$deploy_tmp"
-  chmod --reference="$env_file" "$deploy_tmp"
-  mv "$deploy_tmp" "$deploy_env"
-  mv "$tmp" "$env_file"
+  # Truncate-and-write keeps the inode so owner/mode (e.g. root:deploy 660)
+  # survive when this runs as deploy, which cannot chown back to root.
+  cat "$tmp" > "$env_file"
+  if [ -e "$deploy_env" ]; then
+    cat "$tmp" > "$deploy_env"
+  else
+    cp "$tmp" "$deploy_env"
+    chmod --reference="$env_file" "$deploy_env"
+  fi
+  rm -f "$tmp"
 }
 
 compose() {

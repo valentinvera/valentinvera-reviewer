@@ -141,9 +141,19 @@ sed \
 grep -q '^REVIEWER_DATA_DIR=' "$app/production.env" || {
   printf '\nREVIEWER_DATA_DIR=%s\nREVIEWER_BACKUP_DIR=%s\nREVIEWER_SECRETS_DIR=%s\n' "$app/data" "$app/backups" "$app/secrets" >> "$app/production.env"
 }
+chmod 0660 "$app/production.env"
+cp "$app/production.env" "$app/.deploy.env"
+chmod 0660 "$app/.deploy.env"
+env_inode=$(stat -c '%i' "$app/production.env")
+env_mode=$(stat -c '%a' "$app/production.env")
+deploy_inode=$(stat -c '%i' "$app/.deploy.env")
 cp "$root/compose.yml" "$app/compose.yml"
 old_image=$(awk -F= '$1=="REVIEWER_IMAGE"{print substr($0,index($0,"=")+1)}' "$app/production.env")
 [ -n "$old_image" ] || fail "example env has no image"
+if grep -E 'mv ("\$tmp"|\$tmp) ("\$env_file"|\$env_file)' "$root/deploy-app.sh" >/dev/null; then
+  fail "deploy-app replaces production.env by mv"
+fi
+grep -F -q 'cat "$tmp" > "$env_file"' "$root/deploy-app.sh" || fail "deploy-app does not update production.env in place"
 
 cat > "$work/bin/docker" <<'EOF'
 #!/bin/sh
@@ -188,6 +198,10 @@ grep -q 'deployed ghcr.io/valentinvera/valentinvera-reviewer:abcdef1' "$work/dep
 grep -q -- "-n $root/host-rules.sh install --before-bridges" "$SUDO_LOG" || fail "deploy did not sudo -n the egress install"
 new_image=$(awk -F= '$1=="REVIEWER_IMAGE"{print substr($0,index($0,"=")+1)}' "$app/production.env")
 [ "$new_image" = "ghcr.io/valentinvera/valentinvera-reviewer:abcdef1" ] || fail "production image was not updated"
+[ "$(stat -c '%i' "$app/production.env")" = "$env_inode" ] || fail "production.env inode changed"
+[ "$(stat -c '%a' "$app/production.env")" = "$env_mode" ] || fail "production.env mode changed"
+[ "$(stat -c '%i' "$app/.deploy.env")" = "$deploy_inode" ] || fail ".deploy.env inode changed"
+[ "$(stat -c '%a' "$app/.deploy.env")" = "660" ] || fail ".deploy.env mode changed"
 cmp "$app/production.env" "$app/.deploy.env" || fail ".deploy.env is not the full production env"
 grep -q "^REVIEWER_BACKUP_DIR=$app/backups$" "$app/.deploy.env" || fail "backup directory was dropped"
 grep -q '^PROXY_IP=172.30.208.2$' "$app/.deploy.env" || fail "proxy address was dropped"
