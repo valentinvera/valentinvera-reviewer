@@ -134,15 +134,32 @@ docker compose --env-file deploy/egress/staging.env.example \
 Fill `REVIEWER_IMAGE` and three empty directories before starting the `app`
 profile. Suggested host values:
 
-| Setting       | Staging                   | CI                   | Production              |
-| ------------- | ------------------------- | -------------------- | ----------------------- |
-| Project       | `reviewer-egress-staging` | `reviewer-egress-ci` | `valentinvera-reviewer` |
-| Loopback port | `13100`                   | `13111`              | `3000`                  |
-| App subnet    | `172.30.210.0/24`         | `172.30.209.0/24`    | `172.30.208.0/24`       |
-| Proxy         | `172.30.210.2`            | `172.30.209.2`       | `172.30.208.2`          |
-| App bridge    | `br-vvr-stga`             | `br-vvr-cia`         | `br-vvr-app`            |
-| Egress bridge | `br-vvr-stge`             | `br-vvr-cie`         | `br-vvr-egress`         |
-| nft table     | `reviewer_egress_staging` | `reviewer_egress_ci` | `reviewer_egress`       |
+| Setting            | Staging                   | CI                   | Production              |
+| ------------------ | ------------------------- | -------------------- | ----------------------- |
+| Project            | `reviewer-egress-staging` | `reviewer-egress-ci` | `valentinvera-reviewer` |
+| Loopback port      | `13100`                   | `13111`              | `3000`                  |
+| App subnet         | `172.30.210.0/24`         | `172.30.209.0/24`    | `172.30.208.0/24`       |
+| Proxy (app)        | `172.30.210.2`            | `172.30.209.2`       | `172.30.208.2`          |
+| App                | `172.30.210.3`            | `172.30.209.3`       | `172.30.208.3`          |
+| App `ip_range`     | `172.30.210.128/25`       | `172.30.209.128/25`  | `172.30.208.128/25`     |
+| Proxy (egress)     | `172.30.218.2`            | —                    | `172.30.216.2`          |
+| Ingress relay      | `172.30.221.2`            | —                    | `172.30.219.2`          |
+| Ingress upstream   | `172.30.221.10`           | —                    | `172.30.219.10`         |
+| Ingress publish IP | `172.30.222.2`            | —                    | `172.30.220.2`          |
+| App bridge         | `br-vvr-stga`             | `br-vvr-cia`         | `br-vvr-app`            |
+| Egress bridge      | `br-vvr-stge`             | `br-vvr-cie`         | `br-vvr-egress`         |
+| nft table          | `reviewer_egress_staging` | `reviewer_egress_ci` | `reviewer_egress`       |
+
+Every container attachment uses a fixed `ipv4_address`. Each network's
+`ip_range` is the upper `/25` of its `/24`, so the dynamic pool never
+overlaps `.1`–`.10` (gateway, proxy, app, stage sink/neighbor, ingress
+ends). Do not use IPAM `aux_addresses` for those fixed IPs: on Docker 29
+that reservation collides with the matching `ipv4_address` (`Address
+already in use`). New env keys (`APP_IP`, `APP_IP_RANGE`,
+`PROXY_EGRESS_IP`, `EGRESS_IP_RANGE`, `INGRESS_IP_RANGE`,
+`INGRESS_PUBLISH_IP`, `PUBLISH_IP_RANGE`) are listed with defaults in
+`production.env.example` and `staging.env.example`. Existing networks
+must be recreated for a changed `ip_range` to take effect.
 
 The names in the table above are examples. The host harness does not reuse a
 name, subnet, bridge, port, or nft table that already exists, including those
@@ -271,12 +288,17 @@ sudo cp -a /srv/apps/valentinvera-reviewer/compose.yml /var/tmp/reviewer-compose
 sudo cp -a /srv/apps/valentinvera-reviewer/production.env /var/tmp/reviewer-production.prev.env
 sudo cp -a /srv/apps/valentinvera-reviewer/.deploy.env /var/tmp/reviewer-deploy.prev.env
 sudo cp -a /etc/systemd/system/docker.service.d/valentinvera-reviewer-egress.conf /var/tmp/reviewer-egress-docker-dropin.prev 2>/dev/null || true
+sudo cp -a /etc/sudoers.d/valentinvera-reviewer-egress /var/tmp/reviewer-egress-sudoers.prev 2>/dev/null || true
+sudo cp -a /etc/tmpfiles.d/valentinvera-reviewer-egress.conf /var/tmp/reviewer-egress-tmpfiles.prev 2>/dev/null || true
 ```
 
 Install the new files and reload the unit. `install --before-bridges` loads
 rules named `br-vvr-app` and the other fixed bridges before those interfaces
 exist. When both tables already match, the same command prints `already
-installed` and does not run `nft -f`.
+installed` and does not run `nft -f`. The ForceCommand `deploy` user is not
+root, so `deploy-app` runs the egress binary through `sudo -n` with the
+narrow sudoers entry below. Create the shared flock file before the next
+deploy.
 
 ```sh
 sudo install -m 0755 deploy/egress/host-rules.sh /usr/local/sbin/valentinvera-reviewer-egress
@@ -284,6 +306,12 @@ sudo install -m 0644 deploy/egress/valentinvera-reviewer-egress.service /etc/sys
 sudo install -m 0755 deploy/egress/deploy-app.sh /usr/local/sbin/deploy-app
 sudo install -D -m 0644 deploy/egress/docker.service.d.conf \
   /etc/systemd/system/docker.service.d/valentinvera-reviewer-egress.conf
+sudo install -D -m 0440 deploy/host/sudoers.d/valentinvera-reviewer-egress \
+  /etc/sudoers.d/valentinvera-reviewer-egress
+sudo visudo -cf /etc/sudoers.d/valentinvera-reviewer-egress
+sudo install -D -m 0644 deploy/host/tmpfiles.d/valentinvera-reviewer-egress.conf \
+  /etc/tmpfiles.d/valentinvera-reviewer-egress.conf
+sudo systemd-tmpfiles --create /etc/tmpfiles.d/valentinvera-reviewer-egress.conf
 sudo systemctl daemon-reload
 sudo systemctl enable valentinvera-reviewer-egress.service
 sudo systemctl restart valentinvera-reviewer-egress.service
@@ -291,10 +319,15 @@ sudo test -f /run/valentinvera-reviewer-egress/ready
 sudo grep -qx reviewer_egress /run/valentinvera-reviewer-egress/ready
 ```
 
-Copy `deploy/egress/compose.yml` over the host compose file. Keep the host
-`production.env` directory lines. The new compose file adds a read-only mount
-of `/run/valentinvera-reviewer-egress` at `/run/egress-ready`. Recreate the
-proxy, relay, and app only after the marker exists:
+Copy `deploy/egress/compose.yml` over the host compose file. Merge the new
+IP keys from `deploy/egress/production.env.example` into the host
+`production.env` (and `.deploy.env`) without changing the three directory
+lines: `APP_IP`, `APP_IP_RANGE`, `PROXY_EGRESS_IP`, `EGRESS_IP_RANGE`,
+`INGRESS_IP_RANGE`, `INGRESS_PUBLISH_IP`, and `PUBLISH_IP_RANGE`. The new
+compose file still mounts `/run/valentinvera-reviewer-egress` read-only at
+`/run/egress-ready`. Recreate the networks (or the whole project) so the
+`ip_range` pools apply, then start proxy, relay, and app only after the
+marker exists:
 
 ```sh
 sudo docker compose --env-file /srv/apps/valentinvera-reviewer/production.env \
