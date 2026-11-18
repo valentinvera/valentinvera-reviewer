@@ -514,6 +514,9 @@ assert nets["ingress"]["internal"] is True
 assert nets["publish"].get("internal") is not True
 assert nets["egress"].get("internal") is not True
 assert nets["publish"]["driver_opts"]["com.docker.network.bridge.enable_ip_masquerade"] == "false"
+assert nets["app"]["ipam"]["config"][0]["aux_addresses"]["proxy"] == "172.30.143.2"
+assert nets["ingress"]["ipam"]["config"][0]["aux_addresses"]["relay"] == "172.30.145.2"
+assert nets["ingress"]["ipam"]["config"][0]["aux_addresses"]["upstream"] == "172.30.145.10"
 assert "egress" not in client["networks"]
 assert "publish" not in client["networks"]
 assert "app" not in ingress["networks"]
@@ -542,6 +545,11 @@ assert "publish" not in app["networks"] and "egress" not in app["networks"]
 assert cfg["networks"]["app"]["internal"] is True
 assert cfg["networks"]["ingress"]["internal"] is True
 assert cfg["networks"]["publish"].get("internal") is not True
+assert cfg["networks"]["app"]["ipam"]["config"][0]["aux_addresses"]["proxy"] == "172.30.143.2"
+assert cfg["networks"]["ingress"]["ipam"]["config"][0]["aux_addresses"] == {
+    "relay": "172.30.145.2",
+    "upstream": "172.30.145.10",
+}
 ports = ingress["ports"]
 assert ports[0]["host_ip"] == "127.0.0.1"
 assert int(ports[0]["target"]) == 3000

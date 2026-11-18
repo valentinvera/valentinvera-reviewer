@@ -111,6 +111,11 @@ networks:
       config:
         - subnet: ${APP_SUBNET}
           gateway: ${APP_GATEWAY:?set APP_GATEWAY}
+          # Keep PROXY_IP out of the dynamic pool. restart:unless-stopped
+          # ignores depends_on, so the app can start before the proxy and
+          # would otherwise be handed this address.
+          aux_addresses:
+            proxy: ${PROXY_IP}
   egress:
     name: ${EGRESS_NETWORK_NAME:?set EGRESS_NETWORK_NAME}
     internal: false
@@ -133,6 +138,11 @@ networks:
       config:
         - subnet: ${INGRESS_SUBNET:?set INGRESS_SUBNET}
           gateway: ${INGRESS_GATEWAY:?set INGRESS_GATEWAY}
+          # Both ends of the ingress hop use fixed addresses. Reserve them
+          # so a future dynamic attachment cannot claim either one.
+          aux_addresses:
+            relay: ${INGRESS_RELAY_IP}
+            upstream: ${INGRESS_UPSTREAM_IP}
   publish:
     name: ${PUBLISH_NETWORK_NAME:?set PUBLISH_NETWORK_NAME}
     internal: false
