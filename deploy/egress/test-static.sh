@@ -82,6 +82,11 @@ grep -q '^APP_BRIDGE=br-vvr-sabcdefa$' "$work/ok.plan" || fail "bridge was not u
 grep -q '^INGRESS_BRIDGE=br-vvr-sabcdefi$' "$work/ok.plan" || fail "ingress bridge missing"
 grep -q '^PUBLISH_BRIDGE=br-vvr-sabcdefp$' "$work/ok.plan" || fail "publish bridge missing"
 grep -q '^INGRESS_UPSTREAM_IP=172.30.145.10$' "$work/ok.plan" || fail "ingress upstream missing"
+grep -q '^APP_IP=172.30.143.3$' "$work/ok.plan" || fail "app static address missing"
+grep -q '^APP_IP_RANGE=172.30.143.128/25$' "$work/ok.plan" || fail "app ip_range missing"
+grep -q '^PROXY_EGRESS_IP=172.30.144.2$' "$work/ok.plan" || fail "proxy egress address missing"
+grep -q '^INGRESS_PUBLISH_IP=172.30.146.2$' "$work/ok.plan" || fail "ingress publish address missing"
+grep -q '^PUBLISH_IP_RANGE=172.30.146.128/25$' "$work/ok.plan" || fail "publish ip_range missing"
 grep -q '^PUBLISH_SUBNET=172.30.146.0/24$' "$work/ok.plan" || fail "publish subnet missing"
 grep -q '^PORT=3000$' "$work/ok.plan" && fail "plan used port 3000"
 grep -q '^PORT=20831$' "$work/ok.plan" && fail "plan reused the retained port"
@@ -455,23 +460,30 @@ REVIEWER_SECRETS_DIR=$work/empty
 APP_SUBNET=172.30.143.0/24
 APP_GATEWAY=172.30.143.1
 PROXY_IP=172.30.143.2
+APP_IP=172.30.143.3
+APP_IP_RANGE=172.30.143.128/25
 APP_NETWORK_NAME=vvrstabcdefa
 EGRESS_NETWORK_NAME=vvrstabcdefe
 APP_BRIDGE=br-vvr-sabcdefa
 EGRESS_BRIDGE=br-vvr-sabcdefe
 EGRESS_SUBNET=172.30.144.0/24
 EGRESS_GATEWAY=172.30.144.1
+PROXY_EGRESS_IP=172.30.144.2
+EGRESS_IP_RANGE=172.30.144.128/25
 INGRESS_NETWORK_NAME=vvrstabcdefi
 INGRESS_BRIDGE=br-vvr-sabcdefi
 INGRESS_SUBNET=172.30.145.0/24
 INGRESS_GATEWAY=172.30.145.1
 INGRESS_RELAY_IP=172.30.145.2
 INGRESS_UPSTREAM_IP=172.30.145.10
+INGRESS_IP_RANGE=172.30.145.128/25
 INGRESS_LISTEN_PORT=8080
 PUBLISH_NETWORK_NAME=vvrstabcdefp
 PUBLISH_BRIDGE=br-vvr-sabcdefp
 PUBLISH_SUBNET=172.30.146.0/24
 PUBLISH_GATEWAY=172.30.146.1
+INGRESS_PUBLISH_IP=172.30.146.2
+PUBLISH_IP_RANGE=172.30.146.128/25
 TEST_CONF=$work/squid.conf
 TEST_DIR=$work
 FIXTURE_DIR=$work/fixture
@@ -498,25 +510,34 @@ python3 - "$work/render.json" <<'PY' || fail "rendered ingress topology is wrong
 import json, sys
 cfg = json.load(open(sys.argv[1]))
 client = cfg["services"]["client"]
+proxy = cfg["services"]["proxy"]
 ingress = cfg["services"]["ingress"]
 assert "ports" not in client or not client["ports"], client.get("ports")
 assert set(client["networks"]) == {"app", "ingress"}, client["networks"]
+assert client["networks"]["app"]["ipv4_address"] == "172.30.143.3"
 assert client["networks"]["ingress"]["ipv4_address"] == "172.30.145.10"
+assert proxy["networks"]["app"]["ipv4_address"] == "172.30.143.2"
+assert proxy["networks"]["egress"]["ipv4_address"] == "172.30.144.2"
 ports = ingress["ports"]
 assert len(ports) == 1, ports
 assert ports[0]["host_ip"] == "127.0.0.1"
 assert str(ports[0]["published"]) == "20375"
 assert int(ports[0]["target"]) == 8080
 assert set(ingress["networks"]) == {"ingress", "publish"}, ingress["networks"]
+assert ingress["networks"]["ingress"]["ipv4_address"] == "172.30.145.2"
+assert ingress["networks"]["publish"]["ipv4_address"] == "172.30.146.2"
 nets = cfg["networks"]
 assert nets["app"]["internal"] is True
 assert nets["ingress"]["internal"] is True
 assert nets["publish"].get("internal") is not True
 assert nets["egress"].get("internal") is not True
 assert nets["publish"]["driver_opts"]["com.docker.network.bridge.enable_ip_masquerade"] == "false"
-assert nets["app"]["ipam"]["config"][0]["aux_addresses"]["proxy"] == "172.30.143.2"
-assert nets["ingress"]["ipam"]["config"][0]["aux_addresses"]["relay"] == "172.30.145.2"
-assert nets["ingress"]["ipam"]["config"][0]["aux_addresses"]["upstream"] == "172.30.145.10"
+assert "aux_addresses" not in nets["app"]["ipam"]["config"][0]
+assert "aux_addresses" not in nets["ingress"]["ipam"]["config"][0]
+assert nets["app"]["ipam"]["config"][0]["ip_range"] == "172.30.143.128/25"
+assert nets["egress"]["ipam"]["config"][0]["ip_range"] == "172.30.144.128/25"
+assert nets["ingress"]["ipam"]["config"][0]["ip_range"] == "172.30.145.128/25"
+assert nets["publish"]["ipam"]["config"][0]["ip_range"] == "172.30.146.128/25"
 assert "egress" not in client["networks"]
 assert "publish" not in client["networks"]
 assert "app" not in ingress["networks"]
@@ -537,23 +558,30 @@ python3 - "$work/prod.json" <<'PY' || fail "production ingress topology is wrong
 import json, sys
 cfg = json.load(open(sys.argv[1]))
 app = cfg["services"]["app"]
+proxy = cfg["services"]["proxy"]
 ingress = cfg["services"]["ingress"]
 assert "ports" not in app or not app["ports"], app.get("ports")
 assert set(app["networks"]) == {"app", "ingress"}
+assert app["networks"]["app"]["ipv4_address"] == "172.30.143.3"
 assert app["networks"]["ingress"]["ipv4_address"] == "172.30.145.10"
+assert proxy["networks"]["app"]["ipv4_address"] == "172.30.143.2"
+assert proxy["networks"]["egress"]["ipv4_address"] == "172.30.144.2"
 assert "publish" not in app["networks"] and "egress" not in app["networks"]
 assert cfg["networks"]["app"]["internal"] is True
 assert cfg["networks"]["ingress"]["internal"] is True
 assert cfg["networks"]["publish"].get("internal") is not True
-assert cfg["networks"]["app"]["ipam"]["config"][0]["aux_addresses"]["proxy"] == "172.30.143.2"
-assert cfg["networks"]["ingress"]["ipam"]["config"][0]["aux_addresses"] == {
-    "relay": "172.30.145.2",
-    "upstream": "172.30.145.10",
-}
+assert "aux_addresses" not in cfg["networks"]["app"]["ipam"]["config"][0]
+assert "aux_addresses" not in cfg["networks"]["ingress"]["ipam"]["config"][0]
+assert cfg["networks"]["app"]["ipam"]["config"][0]["ip_range"] == "172.30.143.128/25"
+assert cfg["networks"]["egress"]["ipam"]["config"][0]["ip_range"] == "172.30.144.128/25"
+assert cfg["networks"]["ingress"]["ipam"]["config"][0]["ip_range"] == "172.30.145.128/25"
+assert cfg["networks"]["publish"]["ipam"]["config"][0]["ip_range"] == "172.30.146.128/25"
 ports = ingress["ports"]
 assert ports[0]["host_ip"] == "127.0.0.1"
 assert int(ports[0]["target"]) == 3000
 assert set(ingress["networks"]) == {"ingress", "publish"}
+assert ingress["networks"]["ingress"]["ipv4_address"] == "172.30.145.2"
+assert ingress["networks"]["publish"]["ipv4_address"] == "172.30.146.2"
 assert app["dns"] == ["127.0.0.1"], app.get("dns")
 assert "dns" not in cfg["services"]
 mounts = app.get("volumes") or []
