@@ -10,5 +10,6 @@ describe("migrations", () => {
     expect(versions.map((row) => row.version)).toContain("001_initial")
     expect(versions.map((row) => row.version)).toContain("002_review_state")
     expect(versions.map((row) => row.version)).toContain("003_review_rate_limits")
+    expect(versions.map((row) => row.version)).toContain("004_review_improvements")
   })
 })
