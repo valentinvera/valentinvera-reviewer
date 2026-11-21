@@ -108,14 +108,15 @@ export function completeJob(id: number): void {
   `).run(Date.now(), id)
 }
 
-export function failJob(id: number, error: unknown): void {
+/** Returns whether the job is permanently failed (no retries left). */
+export function failJob(id: number, error: unknown): { final: boolean } {
   const job = db
     .query<{ attempts: number; max_attempts: number }, [number]>(`
       SELECT attempts, max_attempts FROM jobs WHERE id = ?
     `)
     .get(id)
 
-  if (!job) return
+  if (!job) return { final: false }
 
   const message = (error instanceof Error ? error.message : String(error)).slice(0, 2_000)
 
@@ -125,7 +126,7 @@ export function failJob(id: number, error: unknown): void {
       SET status = 'failed', last_error = ?, finished_at = ?
       WHERE id = ?
     `).run(message, Date.now(), id)
-    return
+    return { final: true }
   }
 
   // Exponential backoff: 5s, 10s, 20s... capped at 5 minutes.
@@ -136,6 +137,7 @@ export function failJob(id: number, error: unknown): void {
     SET status = 'queued', last_error = ?, run_after = ?
     WHERE id = ?
   `).run(message, Date.now() + delayMs, id)
+  return { final: false }
 }
 
 /** Re-queues jobs left in `running` when the process died mid-flight. */

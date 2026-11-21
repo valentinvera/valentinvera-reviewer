@@ -47,7 +47,7 @@ describe("queue", () => {
     const job = claimNextJob()
     expect(job).not.toBeNull()
 
-    failJob(job!.id, new Error("boom"))
+    expect(failJob(job!.id, new Error("boom"))).toEqual({ final: true })
 
     const stats = queueStats()
     expect(stats.failed).toBe(1)
@@ -59,7 +59,7 @@ describe("queue", () => {
     const job = claimNextJob()
     expect(job).not.toBeNull()
 
-    failJob(job!.id, new Error("boom"))
+    expect(failJob(job!.id, new Error("boom"))).toEqual({ final: false })
 
     const stats = queueStats()
     expect(stats.queued).toBe(1)

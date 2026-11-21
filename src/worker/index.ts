@@ -3,8 +3,10 @@ import { errorMessage, log } from "../logger"
 import { claimNextJob, completeJob, failJob, type Job } from "../queue"
 
 export type JobHandler = (job: Job) => Promise<void>
+export type FinalFailureHandler = (job: Job, error: unknown) => Promise<void>
 
 const handlers = new Map<string, JobHandler>()
+const finalFailureHandlers = new Map<string, FinalFailureHandler>()
 let running = false
 
 /**
@@ -13,6 +15,11 @@ let running = false
  */
 export function registerJobHandler(kind: string, handler: JobHandler): void {
   handlers.set(kind, handler)
+}
+
+/** Optional hook when a job permanently fails after exhausting retries. */
+export function registerFinalFailureHandler(kind: string, handler: FinalFailureHandler): void {
+  finalFailureHandlers.set(kind, handler)
 }
 
 export function isWorkerRunning(): boolean {
@@ -69,7 +76,21 @@ export function startWorker(): { stop: () => Promise<void> } {
               error: errorMessage(error),
             })
 
-            failJob(job.id, error)
+            const { final } = failJob(job.id, error)
+            if (final) {
+              const onFinal = finalFailureHandlers.get(job.kind)
+              if (onFinal) {
+                try {
+                  await onFinal(job, error)
+                } catch (reportError) {
+                  log.error("job.final_failure_handler_failed", {
+                    id: job.id,
+                    kind: job.kind,
+                    error: errorMessage(reportError),
+                  })
+                }
+              }
+            }
           }
         }
       })(),

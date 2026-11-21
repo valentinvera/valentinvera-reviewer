@@ -12,7 +12,14 @@ const SEVERITY_LABEL: Record<Finding["severity"], string> = {
 }
 
 export function buildInlineComment(finding: Finding): string {
-  return `**${SEVERITY_LABEL[finding.severity]} · ${finding.title}**\n\n${finding.body}`
+  const sections = [`**${SEVERITY_LABEL[finding.severity]} · ${finding.title}**`, "", finding.body]
+
+  const suggestion = finding.suggestion?.trim()
+  if (suggestion) {
+    sections.push("", "```suggestion", suggestion, "```")
+  }
+
+  return sections.join("\n")
 }
 
 export function shortSha(sha: string): string {
@@ -33,10 +40,13 @@ export function buildReviewBody(input: {
   model: string
   unanchored: Finding[]
   truncated: boolean
+  incremental?: boolean
 }): string {
   const sections: string[] = [
     "### 💡 Code Review",
-    "Here are some automated review suggestions for this pull request.",
+    input.incremental
+      ? "Here are automated review suggestions for the new commits on this pull request."
+      : "Here are some automated review suggestions for this pull request.",
     `**Reviewed commit:** \`${shortSha(input.headSha)}\``,
   ]
 
@@ -85,6 +95,29 @@ export function buildRateLimitNotice(reason: RateLimitReason): string {
   }
 }
 
+export function buildFailureComment(errorMessage?: string): string {
+  const detail = errorMessage?.trim()
+    ? `\n\n<details><summary>Error detail</summary>\n\n\`\`\`\n${errorMessage.trim().slice(0, 1_000)}\n\`\`\`\n\n</details>`
+    : ""
+
+  return [
+    "## Code Review failed",
+    "",
+    "The automated review did not complete after several attempts.",
+    "Comment `/review` to retry.",
+    detail,
+  ].join("\n")
+}
+
+export function buildMaxRoundsNotice(maxRounds: number): string {
+  return [
+    "## Automatic reviews paused",
+    "",
+    `This pull request reached the limit of ${maxRounds} automatic review rounds.`,
+    "Comment `/review` to run another review manually.",
+  ].join("\n")
+}
+
 /**
  * Status comment that is created once per PR and updated on every review.
  * When the review found nothing, this comment is the only output.
@@ -97,11 +130,15 @@ export function buildSummaryComment(input: {
   reviewUrl: string | null
   trigger: string
   truncated: boolean
+  incremental?: boolean
+  resolvedCount?: number
 }): string {
   const clean = input.findingsCount === 0
   const review = input.reviewUrl ? `[📝 Code Review](${input.reviewUrl})` : "📝 Code Review"
   const status = clean
-    ? "✅ Completed, no issues found"
+    ? input.incremental
+      ? "✅ Completed, no new issues"
+      : "✅ Completed, no issues found"
     : `💡 Completed, ${pluralize(input.findingsCount, "finding")}`
 
   const lines = [
@@ -113,13 +150,27 @@ export function buildSummaryComment(input: {
     "| --- | --- | --- | --- |",
     `| ${review} | ${status} | \`${shortSha(input.headSha)}\` | ${input.trigger} |`,
     "",
-    clean
-      ? "No issues found. Nice work! 🎉"
-      : "See the inline comments in the review for the suggested changes.",
+  ]
+
+  if (clean) {
+    lines.push(
+      input.incremental
+        ? "No new issues found in the latest commits."
+        : "No issues found. Nice work! 🎉",
+    )
+  } else {
+    lines.push("See the inline comments in the review for the suggested changes.")
+  }
+
+  if (input.resolvedCount && input.resolvedCount > 0) {
+    lines.push("", `Resolved ${pluralize(input.resolvedCount, "prior review thread")}.`)
+  }
+
+  lines.push(
     "",
     ...(input.truncated ? [TRUNCATED_NOTICE, ""] : []),
     `<sub>${input.model} · this comment is updated on every review · comment \`/review\` to run it again</sub>`,
-  ]
+  )
 
   return lines.join("\n")
 }

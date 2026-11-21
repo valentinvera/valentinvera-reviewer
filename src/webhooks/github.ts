@@ -2,9 +2,11 @@ import { config } from "../config"
 import { getWebhooks } from "../github"
 import { errorMessage, log } from "../logger"
 import { enqueueJob } from "../queue"
+import { learnAndResolveFromReply } from "../review/dismissals"
+import { getInstallationClient } from "../review/publisher"
 
 const HANDLED_ACTIONS = new Set(["opened", "synchronize", "reopened", "ready_for_review"])
-const HANDLED_EVENTS = new Set(["pull_request", "issue_comment"])
+const HANDLED_EVENTS = new Set(["pull_request", "issue_comment", "pull_request_review_comment"])
 const ALLOWED_ASSOCIATIONS = new Set(["OWNER", "MEMBER", "COLLABORATOR"])
 const REVIEW_COMMAND = /^(?:@[a-z0-9-]+\s+)?\/review$/i
 
@@ -36,6 +38,20 @@ interface IssueCommentEventPayload {
   }
 }
 
+interface ReviewCommentEventPayload {
+  action: string
+  installation?: { id: number }
+  repository: { full_name: string }
+  pull_request: { number: number }
+  comment: {
+    id: number
+    body: string
+    user: { login: string }
+    author_association: string
+    in_reply_to_id?: number | null
+  }
+}
+
 let handlersRegistered = false
 
 function json(body: unknown, status: number): Response {
@@ -50,6 +66,8 @@ function registerHandlers(): void {
     const event = payload as unknown as PullRequestEventPayload
 
     if (!HANDLED_ACTIONS.has(event.action)) return
+    // Draft PRs are skipped silently (no queue, no check, no comment).
+    // `ready_for_review` arrives with draft=false and triggers a full first review.
     if (event.pull_request.draft) return
 
     const author = event.pull_request.user?.login
@@ -124,6 +142,7 @@ function registerHandlers(): void {
       return
     }
 
+    // Explicit `/review` runs even on draft PRs (handler honors force).
     const queued = enqueueJob({
       deliveryId: id,
       kind: "review_pull_request",
@@ -146,6 +165,44 @@ function registerHandlers(): void {
       queued,
     })
   })
+
+  getWebhooks().on("pull_request_review_comment", ({ id, payload }) => {
+    const event = payload as unknown as ReviewCommentEventPayload
+
+    if (event.action !== "created") return
+    if (!event.comment.in_reply_to_id) return
+    if (!ALLOWED_ASSOCIATIONS.has(event.comment.author_association.toUpperCase())) return
+
+    const installationId = event.installation?.id
+    if (!installationId) return
+
+    void (async () => {
+      try {
+        const client = await getInstallationClient(installationId)
+        const learned = await learnAndResolveFromReply({
+          client,
+          repo: event.repository.full_name,
+          prNumber: event.pull_request.number,
+          replyBody: event.comment.body,
+          parentCommentId: event.comment.in_reply_to_id!,
+        })
+
+        log.info("webhook.review_comment_reply", {
+          delivery: id,
+          repo: event.repository.full_name,
+          pr: event.pull_request.number,
+          learned,
+        })
+      } catch (error) {
+        log.warn("webhook.dismissal_failed", {
+          delivery: id,
+          repo: event.repository.full_name,
+          pr: event.pull_request.number,
+          error: errorMessage(error),
+        })
+      }
+    })()
+  })
 }
 
 /**
@@ -156,8 +213,10 @@ function registerHandlers(): void {
  * - `pull_request` (opened/synchronize/reopened/ready_for_review, non-draft)
  *   is enqueued as `review_pull_request` and acknowledged with 202, unless the
  *   PR author is listed in `REVIEW_SKIP_AUTHORS` (maintenance bots by default).
- * - `/review` comments on a PR enqueue a forced manual review, regardless of
- *   the PR author.
+ * - Draft PRs are skipped silently. `ready_for_review` triggers a full review.
+ * - `/review` comments on a PR enqueue a forced manual review (including drafts),
+ *   regardless of the PR author.
+ * - Replies to bot review comments that dismiss findings are learned and resolved.
  *
  * The actual review is intentionally not implemented here: the worker owns it.
  */

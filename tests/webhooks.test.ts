@@ -173,8 +173,19 @@ describe("POST /webhooks/github", () => {
     expect(queueStats().queued).toBe(0)
   })
 
-  test("ignores draft pull requests", async () => {
+  test("ignores draft pull requests silently", async () => {
     const body = payloadWith({
+      pull_request: { ...basePayload.pull_request, draft: true },
+    })
+    const response = await handleGitHubWebhook(await webhookRequest({ body }))
+
+    expect(response.status).toBe(202)
+    expect(queueStats().queued).toBe(0)
+  })
+
+  test("ignores synchronize on draft pull requests", async () => {
+    const body = payloadWith({
+      action: "synchronize",
       pull_request: { ...basePayload.pull_request, draft: true },
     })
     const response = await handleGitHubWebhook(await webhookRequest({ body }))
@@ -191,12 +202,30 @@ describe("POST /webhooks/github", () => {
     expect(queueStats().queued).toBe(0)
   })
 
-  test("enqueues ready_for_review", async () => {
+  test("enqueues ready_for_review as a full first review trigger", async () => {
     const body = payloadWith({ action: "ready_for_review" })
     const response = await handleGitHubWebhook(await webhookRequest({ body }))
 
     expect(response.status).toBe(202)
     expect(queueStats().queued).toBe(1)
+
+    const row = db.query<{ payload: string }, []>("SELECT payload FROM jobs LIMIT 1").get()
+    const jobPayload = JSON.parse(row!.payload) as Record<string, unknown>
+    expect(jobPayload.action).toBe("ready_for_review")
+    expect(jobPayload.force).toBeUndefined()
+  })
+
+  test("enqueues /review on a draft pull request", async () => {
+    const response = await handleGitHubWebhook(await reviewCommandOnPr("draft-manual-1"))
+
+    expect(response.status).toBe(202)
+    expect(queueStats().queued).toBe(1)
+
+    const row = db.query<{ payload: string }, []>("SELECT payload FROM jobs LIMIT 1").get()
+    expect(JSON.parse(row!.payload)).toMatchObject({
+      action: "manual",
+      force: true,
+    })
   })
 
   test("enqueues a manual /review command", async () => {
