@@ -49,8 +49,15 @@ export interface Config {
   reviewManualCooldownSeconds: number
   reviewManualMaxPerPr24h: number
   reviewGlobalMax24h: number
+  /**
+   * Lifetime cap on successful automatic reviews per pull request.
+   * A value of 0 disables the cap. Manual `/review` is not counted.
+   */
+  reviewAutoMaxRounds: number
   /** Lowercased PR author logins whose PRs are never auto-reviewed. */
   reviewSkipAuthors: string[]
+  /** Name of the GitHub Check Run created for each review. */
+  reviewCheckName: string
 }
 
 /**
@@ -170,7 +177,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     reviewManualCooldownSeconds: int(env.REVIEW_MANUAL_COOLDOWN_SECONDS, 600),
     reviewManualMaxPerPr24h: int(env.REVIEW_MANUAL_MAX_PER_PR_24H, 5),
     reviewGlobalMax24h: int(env.REVIEW_GLOBAL_MAX_24H, 50),
+    reviewAutoMaxRounds: int(env.REVIEW_AUTO_MAX_ROUNDS, 5),
     reviewSkipAuthors: list(env.REVIEW_SKIP_AUTHORS, DEFAULT_REVIEW_SKIP_AUTHORS),
+    reviewCheckName: str(env.REVIEW_CHECK_NAME) ?? "valentinvera-reviewer",
   }
 }
 

@@ -4,14 +4,19 @@ import { db } from "../src/db"
 import type { GeneratedReview } from "../src/review/engine"
 import { processReviewJob, type ReviewJobPayload } from "../src/review/handler"
 import type {
+  CheckRunInput,
   CreateReviewInput,
   PullRequestForReview,
   ReviewGitHubClient,
 } from "../src/review/publisher"
 import {
   countReviewRuns,
+  getAutoReviewRounds,
+  getLastReviewedSha,
   getSummaryCommentId,
   hasReviewed,
+  incrementAutoReviewRounds,
+  markReviewed,
   recordReviewRun,
   setSummaryCommentId,
   type ReviewRunKind,
@@ -89,14 +94,61 @@ interface Calls {
   reviews: CreateReviewInput[]
   comments: string[]
   updates: Array<{ id: number; body: string }>
+  checks: CheckRunInput[]
+  checkUpdates: Array<{ id: number; status: string; conclusion?: string }>
+  compares: Array<{ base: string; head: string }>
+  resolvedThreads: string[]
 }
 
 function fakeClient(overrides: Partial<ReviewGitHubClient> = {}) {
-  const calls: Calls = { reviews: [], comments: [], updates: [] }
+  const calls: Calls = {
+    reviews: [],
+    comments: [],
+    updates: [],
+    checks: [],
+    checkUpdates: [],
+    compares: [],
+    resolvedThreads: [],
+  }
+
+  let checkId = 100
 
   const client: ReviewGitHubClient = {
     getPullRequest: async () => pr,
     getPullRequestDiff: async () => diff,
+    compareCommits: async (_repo, base, head) => {
+      calls.compares.push({ base, head })
+      return { status: "ahead", aheadBy: 1, behindBy: 0, diff }
+    },
+    getFileContent: async () => null,
+    listReviewThreads: async () => [],
+    resolveReviewThread: async (threadId) => {
+      calls.resolvedThreads.push(threadId)
+    },
+    getPullRequestReviewComment: async (_repo, commentId) => ({
+      id: commentId,
+      body: "**🟠 high · Bug**\n\nBody",
+      path: "src/a.ts",
+      line: 1,
+      originalLine: 1,
+      user: "valentinvera-reviewer[bot]",
+      inReplyToId: null,
+      htmlUrl: "https://example.com",
+    }),
+    listCommentReactions: async () => [],
+    createCheckRun: async (_repo, input) => {
+      calls.checks.push(input)
+      checkId += 1
+      return { id: checkId }
+    },
+    updateCheckRun: async (_repo, id, input) => {
+      calls.checkUpdates.push({
+        id,
+        status: input.status,
+        conclusion: input.conclusion,
+      })
+      return { id }
+    },
     createReview: async (_repo, _pr, input) => {
       calls.reviews.push(input)
       return { id: 1, html_url: "https://github.com/review/1" }
@@ -120,6 +172,7 @@ const rateLimitDefaults = {
   reviewManualCooldownSeconds: config.reviewManualCooldownSeconds,
   reviewManualMaxPerPr24h: config.reviewManualMaxPerPr24h,
   reviewGlobalMax24h: config.reviewGlobalMax24h,
+  reviewAutoMaxRounds: config.reviewAutoMaxRounds,
 }
 
 function seedRuns(input: {
@@ -140,9 +193,16 @@ function seedRuns(input: {
 }
 
 beforeEach(() => {
-  db.exec(
-    "DELETE FROM reviewed_commits; DELETE FROM summary_comments; DELETE FROM review_runs; DELETE FROM review_rate_limit_notices",
-  )
+  db.exec(`
+    DELETE FROM reviewed_commits;
+    DELETE FROM summary_comments;
+    DELETE FROM review_runs;
+    DELETE FROM review_rate_limit_notices;
+    DELETE FROM review_auto_rounds;
+    DELETE FROM learned_dismissals;
+    DELETE FROM active_reviews;
+    DELETE FROM failure_comments;
+  `)
 })
 
 afterEach(() => {
@@ -150,6 +210,7 @@ afterEach(() => {
   config.reviewManualCooldownSeconds = rateLimitDefaults.reviewManualCooldownSeconds
   config.reviewManualMaxPerPr24h = rateLimitDefaults.reviewManualMaxPerPr24h
   config.reviewGlobalMax24h = rateLimitDefaults.reviewGlobalMax24h
+  config.reviewAutoMaxRounds = rateLimitDefaults.reviewAutoMaxRounds
 })
 
 describe("processReviewJob", () => {
@@ -175,6 +236,9 @@ describe("processReviewJob", () => {
     expect(calls.comments[0]).toContain("[📝 Code Review](https://github.com/review/1)")
     expect(calls.comments[0]).toContain("| PR opened |")
     expect(hasReviewed(payload.repo, payload.prNumber, payload.headSha!)).toBe(true)
+    expect(calls.checks).toHaveLength(1)
+    expect(calls.checks[0]?.status).toBe("in_progress")
+    expect(calls.checkUpdates.at(-1)?.conclusion).toBe("neutral")
   })
 
   test("posts only a summary comment when the review finds no issues", async () => {
@@ -194,6 +258,7 @@ describe("processReviewJob", () => {
     expect(calls.comments[0]).toContain("No issues found. Nice work! 🎉")
     expect(getSummaryCommentId(payload.repo, payload.prNumber)).toBe(10)
     expect(hasReviewed(payload.repo, payload.prNumber, payload.headSha!)).toBe(true)
+    expect(calls.checkUpdates.at(-1)?.conclusion).toBe("success")
   })
 
   test("updates the existing summary comment on a clean manual review", async () => {
@@ -223,7 +288,7 @@ describe("processReviewJob", () => {
     ]
 
     for (const [action, label] of cases) {
-      db.exec("DELETE FROM reviewed_commits; DELETE FROM summary_comments")
+      db.exec("DELETE FROM reviewed_commits; DELETE FROM summary_comments; DELETE FROM review_runs")
       const { client, calls } = fakeClient()
 
       await processReviewJob(
@@ -254,6 +319,14 @@ describe("processReviewJob", () => {
 
     expect(calls.reviews).toHaveLength(0)
     expect(hasReviewed(payload.repo, payload.prNumber, payload.headSha!)).toBe(false)
+    expect(
+      countReviewRuns({
+        repo: payload.repo,
+        prNumber: payload.prNumber,
+        kind: "auto",
+        since: Date.now() - 60_000,
+      }),
+    ).toBe(0)
   })
 
   test("does not review the same head sha twice", async () => {
@@ -286,20 +359,282 @@ describe("processReviewJob", () => {
     expect(hasReviewed(payload.repo, payload.prNumber, payload.headSha!)).toBe(false)
   })
 
-  test("skips drafts and closed pull requests", async () => {
-    for (const override of [{ draft: true }, { state: "closed" as const }]) {
-      db.exec("DELETE FROM reviewed_commits; DELETE FROM summary_comments")
-      const { client, calls } = fakeClient({
-        getPullRequest: async () => ({ ...pr, ...override }),
-      })
+  test("skips draft pull requests for automatic reviews without checks or comments", async () => {
+    const { client, calls } = fakeClient({
+      getPullRequest: async () => ({ ...pr, draft: true }),
+    })
 
-      await processReviewJob(payload, {
+    await processReviewJob(payload, {
+      getClient: async () => client,
+      generateReview: async () => generated,
+    })
+
+    expect(calls.reviews).toHaveLength(0)
+    expect(calls.comments).toHaveLength(0)
+    expect(calls.checks).toHaveLength(0)
+  })
+
+  test("skips closed pull requests", async () => {
+    const { client, calls } = fakeClient({
+      getPullRequest: async () => ({ ...pr, state: "closed" }),
+    })
+
+    await processReviewJob(payload, {
+      getClient: async () => client,
+      generateReview: async () => generated,
+    })
+
+    expect(calls.reviews).toHaveLength(0)
+    expect(calls.checks).toHaveLength(0)
+  })
+
+  test("runs an explicit /review on a draft pull request", async () => {
+    const { client, calls } = fakeClient({
+      getPullRequest: async () => ({ ...pr, draft: true }),
+    })
+
+    await processReviewJob(
+      { ...payload, action: "manual", force: true },
+      {
         getClient: async () => client,
-        generateReview: async () => generated,
-      })
+        generateReview: async () => clean,
+      },
+    )
 
-      expect(calls.reviews).toHaveLength(0)
-    }
+    expect(calls.comments).toHaveLength(1)
+    expect(calls.checks).toHaveLength(1)
+    expect(hasReviewed(payload.repo, payload.prNumber, payload.headSha!)).toBe(true)
+  })
+
+  test("uses the compare API for synchronize after a prior review", async () => {
+    markReviewed({
+      repo: payload.repo,
+      prNumber: payload.prNumber,
+      headSha: "oldsha00001",
+      reviewId: 1,
+    })
+
+    const incrementalDiff = `diff --git a/src/a.ts b/src/a.ts
+--- a/src/a.ts
++++ b/src/a.ts
+@@ -1,1 +1,1 @@
+-const b = 2
++const b = 3
+`
+    let generateMode: string | undefined
+    const { client, calls } = fakeClient({
+      compareCommits: async (_repo, base, head) => {
+        calls.compares.push({ base, head })
+        return { status: "ahead", aheadBy: 1, behindBy: 0, diff: incrementalDiff }
+      },
+      getPullRequestDiff: async () => {
+        throw new Error("full diff should not be fetched")
+      },
+    })
+
+    await processReviewJob(
+      { ...payload, action: "synchronize", headSha: pr.headSha },
+      {
+        getClient: async () => client,
+        generateReview: async (input) => {
+          generateMode = input.mode
+          return {
+            ...clean,
+            clipped: {
+              diff: incrementalDiff,
+              truncated: false,
+              originalChars: incrementalDiff.length,
+            },
+          }
+        },
+      },
+    )
+
+    expect(calls.compares).toEqual([{ base: "oldsha00001", head: pr.headSha }])
+    expect(generateMode).toBe("incremental")
+    expect(calls.comments[0]).toContain("no new issues")
+    expect(getLastReviewedSha(payload.repo, payload.prNumber)).toBe(pr.headSha)
+  })
+
+  test("falls back to the full diff when compare reports a force-push", async () => {
+    markReviewed({
+      repo: payload.repo,
+      prNumber: payload.prNumber,
+      headSha: "oldsha00001",
+      reviewId: 1,
+    })
+
+    let generateMode: string | undefined
+    const { client, calls } = fakeClient({
+      compareCommits: async (_repo, base, head) => {
+        calls.compares.push({ base, head })
+        return { status: "diverged", aheadBy: 1, behindBy: 2, diff: "" }
+      },
+    })
+
+    await processReviewJob(
+      { ...payload, action: "synchronize" },
+      {
+        getClient: async () => client,
+        generateReview: async (input) => {
+          generateMode = input.mode
+          return clean
+        },
+      },
+    )
+
+    expect(calls.compares).toHaveLength(1)
+    expect(generateMode).toBe("full")
+  })
+
+  test("ready_for_review uses a full diff even if a prior SHA exists", async () => {
+    markReviewed({
+      repo: payload.repo,
+      prNumber: payload.prNumber,
+      headSha: "oldsha00001",
+      reviewId: 1,
+    })
+
+    let generateMode: string | undefined
+    const { client, calls } = fakeClient()
+
+    await processReviewJob(
+      { ...payload, action: "ready_for_review", headSha: "newsha00002", force: false },
+      {
+        getClient: async () =>
+          ({
+            ...client,
+            getPullRequest: async () => ({ ...pr, headSha: "newsha00002" }),
+          }) as ReviewGitHubClient,
+        generateReview: async (input) => {
+          generateMode = input.mode
+          return clean
+        },
+      },
+    )
+
+    expect(calls.compares).toHaveLength(0)
+    expect(generateMode).toBe("full")
+  })
+
+  test("auto-resolves fixed prior threads from the model result", async () => {
+    const { client, calls } = fakeClient()
+
+    await processReviewJob(payload, {
+      getClient: async () => client,
+      generateReview: async () => ({
+        ...clean,
+        result: {
+          summary: "Fixed prior issue.",
+          verdict: "looks_good",
+          findings: [],
+          fixedThreadIds: ["PRRT_1"],
+        },
+      }),
+    })
+
+    expect(calls.resolvedThreads).toEqual(["PRRT_1"])
+    expect(calls.comments[0]).toContain("Resolved 1 prior review thread")
+  })
+
+  test("emits suggestion blocks on inline comments", async () => {
+    const { client, calls } = fakeClient()
+
+    await processReviewJob(payload, {
+      getClient: async () => client,
+      generateReview: async () => ({
+        ...generated,
+        result: {
+          summary: "Fix it.",
+          verdict: "needs_changes",
+          findings: [
+            {
+              path: "src/a.ts",
+              line: 1,
+              side: "RIGHT",
+              severity: "high",
+              title: "Use const",
+              body: "Prefer const.",
+              suggestion: "const a = 1",
+            },
+          ],
+        },
+      }),
+    })
+
+    expect(calls.reviews[0]?.comments[0]?.body).toContain("```suggestion")
+    expect(calls.reviews[0]?.comments[0]?.body).toContain("const a = 1")
+  })
+
+  test("stops automatic reviews after the max rounds with a one-time note", async () => {
+    config.reviewAutoMaxRounds = 2
+    incrementAutoReviewRounds(payload.repo, payload.prNumber)
+    incrementAutoReviewRounds(payload.repo, payload.prNumber)
+
+    const { client, calls } = fakeClient()
+
+    await processReviewJob(payload, {
+      getClient: async () => client,
+      generateReview: async () => generated,
+    })
+    await processReviewJob(
+      { ...payload, headSha: "another0001" },
+      {
+        getClient: async () =>
+          ({
+            ...client,
+            getPullRequest: async () => ({ ...pr, headSha: "another0001" }),
+          }) as ReviewGitHubClient,
+        generateReview: async () => generated,
+      },
+    )
+
+    expect(calls.reviews).toHaveLength(0)
+    expect(calls.comments).toHaveLength(1)
+    expect(calls.comments[0]).toContain("Automatic reviews paused")
+    expect(calls.checks).toHaveLength(0)
+    expect(getAutoReviewRounds(payload.repo, payload.prNumber)).toBe(2)
+  })
+
+  test("manual /review still works after the max automatic rounds", async () => {
+    config.reviewAutoMaxRounds = 1
+    incrementAutoReviewRounds(payload.repo, payload.prNumber)
+
+    const { client, calls } = fakeClient()
+
+    await processReviewJob(
+      { ...payload, action: "manual", force: true },
+      {
+        getClient: async () => client,
+        generateReview: async () => clean,
+      },
+    )
+
+    expect(calls.comments.length + calls.updates.length).toBeGreaterThan(0)
+    expect(calls.checks).toHaveLength(1)
+  })
+
+  test("counts quota only after a successful publish", async () => {
+    const { client } = fakeClient({
+      createIssueComment: async () => {
+        throw { status: 500 }
+      },
+    })
+
+    await expect(
+      processReviewJob(payload, {
+        getClient: async () => client,
+        generateReview: async () => clean,
+      }),
+    ).rejects.toEqual({ status: 500 })
+
+    expect(
+      countReviewRuns({
+        repo: payload.repo,
+        prNumber: payload.prNumber,
+        since: Date.now() - 60_000,
+      }),
+    ).toBe(0)
   })
 
   test("updates an existing summary comment instead of creating a new one", async () => {

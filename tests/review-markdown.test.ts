@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { config } from "../src/config"
 import {
+  buildFailureComment,
   buildInlineComment,
+  buildMaxRoundsNotice,
   buildRateLimitNotice,
   buildReviewBody,
   buildSummaryComment,
@@ -64,6 +66,15 @@ describe("buildInlineComment", () => {
     expect(buildInlineComment(finding)).toBe(
       "**🟠 high · Null dereference**\n\n`user` can be undefined here.",
     )
+  })
+
+  test("appends a GitHub suggestion block when provided", () => {
+    expect(
+      buildInlineComment({
+        ...finding,
+        suggestion: "const user = input.user ?? {}",
+      }),
+    ).toContain("```suggestion\nconst user = input.user ?? {}\n```")
   })
 })
 
@@ -144,5 +155,25 @@ describe("buildSummaryComment", () => {
     expect(buildSummaryComment({ ...base, truncated: true })).toContain(
       "only part of it was reviewed",
     )
+  })
+
+  test("uses the no-new-issues wording for incremental clean reviews", () => {
+    const body = buildSummaryComment({ ...base, incremental: true })
+    expect(body).toContain("✅ Completed, no new issues")
+    expect(body).toContain("No new issues found in the latest commits.")
+  })
+})
+
+describe("buildFailureComment", () => {
+  test("mentions /review as the retry path", () => {
+    expect(buildFailureComment("boom")).toContain("Comment `/review` to retry.")
+    expect(buildFailureComment("boom")).toContain("boom")
+  })
+})
+
+describe("buildMaxRoundsNotice", () => {
+  test("mentions the round limit and /review", () => {
+    expect(buildMaxRoundsNotice(5)).toContain("5 automatic review rounds")
+    expect(buildMaxRoundsNotice(5)).toContain("`/review`")
   })
 })

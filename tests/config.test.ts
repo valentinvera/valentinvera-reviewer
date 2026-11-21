@@ -32,6 +32,8 @@ describe("loadConfig", () => {
     expect(config.reviewManualCooldownSeconds).toBe(600)
     expect(config.reviewManualMaxPerPr24h).toBe(5)
     expect(config.reviewGlobalMax24h).toBe(50)
+    expect(config.reviewAutoMaxRounds).toBe(5)
+    expect(config.reviewCheckName).toBe("valentinvera-reviewer")
     expect(config.maxRequestBodyBytes).toBe(10 * 1024 * 1024)
     expect(config.reviewSkipAuthors).toEqual([...DEFAULT_REVIEW_SKIP_AUTHORS])
   })
@@ -49,6 +51,8 @@ describe("loadConfig", () => {
       REVIEW_MANUAL_COOLDOWN_SECONDS: "120",
       REVIEW_MANUAL_MAX_PER_PR_24H: "3",
       REVIEW_GLOBAL_MAX_24H: "25",
+      REVIEW_AUTO_MAX_ROUNDS: "3",
+      REVIEW_CHECK_NAME: "custom-check",
       JOB_MAX_ATTEMPTS: "5",
       AI_REASONING_MODE: "low",
       AI_MAX_OUTPUT_TOKENS: "64000",
@@ -68,6 +72,8 @@ describe("loadConfig", () => {
     expect(config.reviewManualCooldownSeconds).toBe(120)
     expect(config.reviewManualMaxPerPr24h).toBe(3)
     expect(config.reviewGlobalMax24h).toBe(25)
+    expect(config.reviewAutoMaxRounds).toBe(3)
+    expect(config.reviewCheckName).toBe("custom-check")
     expect(config.jobMaxAttempts).toBe(5)
     expect(config.aiReasoningMode).toBe("low")
     expect(config.aiMaxOutputTokens).toBe(64_000)
